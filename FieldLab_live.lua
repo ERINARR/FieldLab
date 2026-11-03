@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.4
+-- FIELDLAB_BUILD: 8.6.5
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.4", Ready = false}
+    local runtime = {Version = "8.6.5", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.4 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.5 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -5437,6 +5437,42 @@ do
         local typeList = scrolling(page, "OwnedPlanterList", 12, 99, 226, 144)
         local fieldList = scrolling(page, "PlanterFieldList", 246, 99, 156, 144)
         local slotList = scrolling(page, "ThreePlanterSlots", 410, 99, 148, 144)
+        -- This live panel tracks DEPLOYED personal planters independently of
+        -- the three planner slots. It is moved into its own Midnight accordion.
+        local livePanel = ui("Frame", {
+            Name = "LivePlanterPanel", Position = UDim2.fromOffset(12, 392),
+            Size = UDim2.new(1, -34, 0, 194), BackgroundTransparency = 1,
+            BorderSizePixel = 0, ZIndex = 5,
+        }, page)
+        local liveSummary = label(livePanel,
+            "SCANNING DEPLOYED PLANTERS...", 0, 0, 520, 21, 12, palette.muted)
+        local liveRows = {}
+        for i = 1, 3 do
+            local card = ui("Frame", {
+                Name = "ActivePlanter" .. i,
+                Position = UDim2.fromOffset(0, 24 + (i - 1) * 55),
+                Size = UDim2.new(1, -6, 0, 51),
+                BackgroundColor3 = palette.surface, BorderSizePixel = 0,
+                Visible = false, ZIndex = 6,
+            }, livePanel)
+            ui("UICorner", {CornerRadius = UDim.new(0, 5)}, card)
+            local nameLabel = label(card, "", 10, 3, 480, 19, 12, palette.text)
+            nameLabel.Size = UDim2.new(1, -18, 0, 19)
+            nameLabel.Font = Enum.Font.GothamBold
+            local detailLabel = label(card, "", 10, 23, 480, 14, 11, palette.muted)
+            detailLabel.Size = UDim2.new(1, -18, 0, 14)
+            local track = ui("Frame", {
+                Position = UDim2.fromOffset(10, 42),
+                Size = UDim2.new(1, -20, 0, 5),
+                BackgroundColor3 = palette.bg, BorderSizePixel = 0, ZIndex = 8,
+            }, card)
+            local fill = ui("Frame", {
+                Size = UDim2.fromScale(0, 1), BackgroundColor3 = palette.accent,
+                BorderSizePixel = 0, ZIndex = 9,
+            }, track)
+            liveRows[i] = {Card = card, Name = nameLabel, Detail = detailLabel,
+                Fill = fill}
+        end
         local pendingLabel = label(page, "Choose a planter and a field", 12, 248, 385, 23, 12, palette.muted)
         local okButton = button(page, "OK  + SLOT", 410, 247, 148, 26)
         label(page, "HOVER SLOT FOR REWARDS  |  CLICK A SLOT ON MOBILE", 12, 277, 545, 15, 10, palette.muted)
@@ -5509,20 +5545,78 @@ do
             end)
             if window.Parent then window.Visible = wasVisible end
         end
+        -- The deployed objects shown in Dex are PlanterBulb models under
+        -- Workspace.Planters. Their Name is not necessarily the planter type;
+        -- the type comes from GuiAttach > PlanterGui > Bar > TextLabel.
+        local function attachedGui(model)
+            if not model then return nil end
+            local attach = model:FindFirstChild("GuiAttach", true)
+            local gui = attach and attach:FindFirstChild("PlanterGui", true)
+            return gui
+        end
+        local function planterText(model)
+            local gui = attachedGui(model)
+            if not gui then return nil end
+            local bar = gui:FindFirstChild("Bar", true)
+            local name = bar and bar:FindFirstChild("TextLabel", true)
+            if name and name:IsA("TextLabel") and name.Text ~= "" then
+                return name.Text
+            end
+            for _, obj in ipairs(gui:GetDescendants()) do
+                if obj:IsA("TextLabel") and obj.Text:find("Planter", 1, true) then
+                    return obj.Text
+                end
+            end
+            return nil
+        end
+        local function planterType(model)
+            local shown = planterText(model)
+            local name = shown and shown:match("^%s*(.-)%s*%(%s*[%d%.]+%s*%%%s*%)")
+            if not name or name == "" then
+                name = shown and shown:match("^%s*(.-)%s*%(")
+            end
+            if name and name ~= "" then return canonical(name) end
+            if model and norm(model.Name) ~= "planterbulb" then
+                return canonical(model.Name)
+            end
+            local parent = model and model.Parent
+            if parent and norm(parent.Name):find("planter", 1, true)
+                and norm(parent.Name) ~= "planters" then
+                return canonical(parent.Name)
+            end
+            return "Unknown Planter"
+        end
         local function activeModels()
             local folder = workspace:FindFirstChild("Planters")
             local result = {}
             if not folder then return result end
-            for _, model in ipairs(folder:GetChildren()) do
-                if norm(model.Name):find("planter", 1, true)
-                    and (model:FindFirstChild("PlanterBulb", true)
-                        or model:FindFirstChild("Soil", true)) then
-                    table.insert(result, model)
+            -- Resolve each individual bulb, not an arbitrary outer container.
+            -- This prevents duplicate counting and maps GrowthPercent to the
+            -- exact PlanterGui whose name/owner indicator was observed.
+            for _, model in ipairs(folder:GetDescendants()) do
+                if model.Name == "PlanterBulb"
+                    and (model:IsA("Model") or model:IsA("BasePart")) then
+                    local value = model:FindFirstChild("GrowthPercent", true)
+                    if value and value:IsA("ValueBase") then
+                        table.insert(result, model)
+                    end
+                end
+            end
+            -- Older game layouts may put GrowthPercent directly in a typed
+            -- model without using a child called PlanterBulb.
+            if #result == 0 then
+                for _, model in ipairs(folder:GetChildren()) do
+                    if model:FindFirstChild("GrowthPercent", true) then
+                        table.insert(result, model)
+                    end
                 end
             end
             return result
         end
         local function mine(model)
+            -- On this client's Dex layout only personal planters have their
+            -- attached PlanterGui. Never assume an unknown owner is ours.
+            if not attachedGui(model) then return false end
             for _, key in ipairs({"Owner", "Player", "OwnerUserId", "UserId"}) do
                 local val = model:GetAttribute(key)
                 local child = model:FindFirstChild(key, true)
@@ -5532,12 +5626,11 @@ do
                         or tostring(val) == tostring(player.UserId)
                 end
             end
-            -- Planters may be client-replicated without an explicit owner field.
-            -- Require that the local client has a matching deployed type.
             return true
         end
         local function modelPosition(model)
             if not model or not model.Parent then return nil end
+            if model:IsA("BasePart") then return model.Position end
             local soil = model:FindFirstChild("Soil", true)
             if soil and soil:IsA("BasePart") then return soil.Position end
             local bulb = model:FindFirstChild("PlanterBulb", true)
@@ -5556,38 +5649,87 @@ do
             return nil
         end
         local function progress(model)
-            local gui = model:FindFirstChild("PlanterGui", true)
-            if gui then
-                for _, obj in ipairs(gui:GetDescendants()) do
-                    if obj:IsA("TextLabel") then
-                        local percent = tostring(obj.Text):match("(%d+%.?%d*)%s*%%")
-                        if percent then return math.clamp(tonumber(percent) or 0, 0, 100) end
-                    end
-                end
-            end
-            local bulb = model:FindFirstChild("PlanterBulb", true)
-            local v = bulb and bulb:FindFirstChild("GrowthPercent", true)
+            -- GrowthPercent is a ratio (e.g. 0.501 = 50.1%). It is the primary
+            -- numeric source. The attached label is a fallback and type source.
+            local bulb = model.Name == "PlanterBulb" and model
+                or model:FindFirstChild("PlanterBulb", true) or model
+            local v = bulb:FindFirstChild("GrowthPercent", true)
             if v and v:IsA("ValueBase") then
                 local number = tonumber(v.Value)
-                if number then return math.clamp(number <= 1 and number * 100 or number, 0, 100) end
+                if number then
+                    return math.clamp(number <= 1 and number * 100 or number, 0, 100)
+                end
             end
-            return nil
+            local shown = planterText(model)
+            local number = shown and tonumber(shown:match("(%d+%.?%d*)%s*%%"))
+            return number and math.clamp(number, 0, 100) or nil
         end
         local function findModel(typ)
             for _, model in ipairs(activeModels()) do
-                if mine(model) and norm(model.Name) == norm(typ) then return model end
+                if mine(model) and norm(planterType(model)) == norm(typ) then
+                    return model
+                end
             end
             return nil
         end
         local function ownedTypes()
             local names = inventoryRows()
             for _, model in ipairs(activeModels()) do
-                if mine(model) then names[norm(model.Name)] = canonical(model.Name) end
+                if mine(model) then
+                    local typ = planterType(model)
+                    if norm(typ) ~= "unknownplanter" then
+                        names[norm(typ)] = typ
+                    end
+                end
             end
             local result = {}
             for _, name in pairs(names) do table.insert(result, name) end
             table.sort(result, function(a, b) return a:lower() < b:lower() end)
             return result
+        end
+        local function renderLive()
+            local mineNow = {}
+            for _, model in ipairs(activeModels()) do
+                if mine(model) then table.insert(mineNow, model) end
+            end
+            table.sort(mineNow, function(a, b)
+                return planterType(a):lower() < planterType(b):lower()
+            end)
+            local count = #mineNow
+            liveSummary.Text = string.format("MY PLANTERS: %d/3   |   HARVEST TARGET: %d%%",
+                count, state.HarvestAt)
+            counter.Text = string.format("Slots: %d/3   |   Active: %d/3",
+                #state.Slots, count)
+            for i, row in ipairs(liveRows) do
+                local model = mineNow[i]
+                row.Card.Visible = model ~= nil
+                if model then
+                    local p = progress(model)
+                    local typ = planterType(model)
+                    local field = fieldFor(model) or "Field unknown"
+                    local percentage = p and string.format("%.1f%%", p) or "??%"
+                    local remaining = p and math.max(0, state.HarvestAt - p) or nil
+                    local ready = p and p >= state.HarvestAt
+                    row.Name.Text = string.format("%d. %s    |    %s", i, typ, field)
+                    if not p then
+                        row.Detail.Text = "GrowthPercent unavailable; check PlanterBulb"
+                        row.Detail.TextColor3 = palette.alert
+                    elseif ready then
+                        row.Detail.Text = "GROWTH " .. percentage .. "   |   READY TO HARVEST"
+                        row.Detail.TextColor3 = Color3.fromRGB(123, 236, 167)
+                    else
+                        row.Detail.Text = string.format(
+                            "GROWTH %s   |   %.1f%% until harvest", percentage, remaining)
+                        row.Detail.TextColor3 = palette.muted
+                    end
+                    row.Fill.Size = UDim2.fromScale(math.clamp((p or 0) / 100, 0, 1), 1)
+                    row.Fill.BackgroundColor3 = ready and Color3.fromRGB(123, 236, 167)
+                        or palette.accent
+                end
+            end
+            if count == 0 then
+                liveSummary.Text = "MY PLANTERS: 0/3   |   No owned PlanterGui detected"
+            end
         end
         local function selectedIndex(typ)
             for index, config in ipairs(state.Slots) do
@@ -5653,7 +5795,6 @@ do
             if state.SlotSignature == signature then return end
             state.SlotSignature = signature
             clearList(slotList)
-            counter.Text = string.format("Slots: %d/3", #state.Slots)
             for i, config in ipairs(state.Slots) do
                 local deployed = findModel(config.Type)
                 local grow = deployed and progress(deployed)
@@ -5769,7 +5910,7 @@ do
                 if type(t) == "table" then
                     for _, meta in pairs(t) do
                         if type(meta) == "table" and meta.IsMine == true and meta.ActorID ~= nil
-                            and norm(meta.Type) == norm(model.Name) then
+                            and norm(meta.Type) == norm(planterType(model)) then
                             return meta.ActorID
                         end
                     end
@@ -5786,7 +5927,7 @@ do
             local remote = events and events:FindFirstChild("PlanterModelCollect")
             for attempt = 1, 4 do
                 if not allowed(epoch) then return false, "Đã hủy" end
-                setStatus(string.format("Thu hoạch %s (lần %d/4)", canonical(model.Name), attempt))
+                setStatus(string.format("Thu hoạch %s (lần %d/4)", planterType(model), attempt))
                 if actorId ~= nil and remote and remote:IsA("RemoteEvent") then
                     pcall(function() remote:FireServer(actorId) end)
                 else
@@ -5815,7 +5956,7 @@ do
                 if mine(other) then
                     total += 1
                     if fieldFor(other) == config.Field then
-                        return false, "Field đã có planter: " .. other.Name
+                        return false, "Field đã có planter: " .. planterType(other)
                     end
                 end
             end
@@ -5982,14 +6123,16 @@ do
         renderFields()
         renderTypes()
         renderSlots()
+        renderLive()
         updatePending()
         task.spawn(function()
             while screen.Parent do
                 if selectedTab == "Plant" then
                     if not next(inventoryRows()) then ensureInventoryOpen() end
                     renderTypes()
-                    if os.clock() - state.LastUiUpdate >= 2 then
+                    if os.clock() - state.LastUiUpdate >= 0.8 then
                         renderSlots()
+                        renderLive()
                         state.LastUiUpdate = os.clock()
                     end
                 end
@@ -6326,7 +6469,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.4") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.5") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6387,7 +6530,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.4",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.5",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -6767,8 +6910,12 @@ do
                 hideTitles={["PLANT MANAGER"]=true}},
             {id="PlantSlots",title="PLANTERS  /  YOUR THREE SLOTS",height=348,
                 open=true,yBase=75,xBase=0},
+            {id="PlantLive",title="ACTIVE PLANTERS  /  GROWTH",height=244,
+                open=true,yBase=380,xBase=0},
         }, function(obj,x,y)
-            return y < 75 and "PlantControls" or "PlantSlots"
+            if y < 75 then return "PlantControls" end
+            if y < 380 then return "PlantSlots" end
+            return "PlantLive"
         end)
 
         accordions("Config", {
@@ -6864,7 +7011,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.4" then
+    if runtime and runtime.Version == "8.6.5" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
