@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.0
+-- FIELDLAB_BUILD: 8.6.1
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.0", Ready = false}
+    local runtime = {Version = "8.6.1", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.0 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.1 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -42,7 +42,7 @@ local HivePlatforms = workspace:WaitForChild("HivePlatforms")
 local FlowerZones = workspace:WaitForChild("FlowerZones")
 
 local TweenSpeed = 100
-local WalkSpeed = 16
+local WalkSpeed = 90
 local HiveHeightOffset = 3
 local selectedField = nil
 local farmEnabled, clickEnabled = false, false
@@ -1318,7 +1318,9 @@ ConfigManager.Register("Farm", function()
 end, function(data)
     local fly, walk = tonumber(data.FlySpeed), tonumber(data.WalkSpeed)
     if fly and fly >= 5 and fly <= 250 then TweenSpeed = fly end
-    if walk and walk >= 5 and walk <= 120 then WalkSpeed = walk end
+    -- Migrate the previous default of 16 to the new trial speed (90).
+    -- Preserve non-default custom walk speeds.
+    if walk and walk >= 5 and walk <= 120 then WalkSpeed = (walk == 16) and 90 or walk end
     speedBox.Text = tostring(TweenSpeed)
     walkSpeedBox.Text = tostring(WalkSpeed)
     if walkingHumanoid and walkingHumanoid.Parent then walkingHumanoid.WalkSpeed = WalkSpeed end
@@ -6152,7 +6154,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.0") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.1") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6213,7 +6215,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.0",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.1",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -6691,7 +6693,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.0" then
+    if runtime and runtime.Version == "8.6.1" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
