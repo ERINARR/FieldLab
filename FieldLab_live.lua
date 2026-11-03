@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.8
+-- FIELDLAB_BUILD: 8.6.9
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.8", Ready = false}
+    local runtime = {Version = "8.6.9", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.8 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.9 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2359,10 +2359,10 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
+    -- v8.6.9: one continuous steering session, not a new walk binding for
+    -- every token. Keep the heading and WalkSpeed across target changes.
     function LootTools.CollectNew(options)
         local center = options.Center
-        -- A defeated mob can drop rewards around its actual death point rather
-        -- than the center of its MonsterSpawner territory.
         local centers = options.Centers or {center}
         local radius = options.Radius or 40
         local duration = options.Duration or 28
@@ -2370,67 +2370,202 @@ do
         local allowed = options.Allowed or function() return true end
         local field = options.Field
         local report = options.Report or function() end
-        local tries = setmetatable({}, {__mode = "k"})
-        local started = os.clock()
-        local lastFound = started
-        local foundNew, collected = false, 0
-        local maxWaitForDrops = options.DropGrace or 8
-        local quietPeriod = options.QuietPeriod or 4.5
-        local collectOld = options.CollectExisting == true
-        while allowed() and os.clock() - started < duration do
-            local humanoid, root = getHumanoidAndRoot()
-            if not humanoid or humanoid.Health <= 0 then break end
-            local fresh, freshScore = nil, math.huge
-            local existing, oldScore = nil, math.huge
-            LootTools.Each(function(part)
-                if part.Parent and (tries[part] or 0) < 2 then
-                    local p = part.Position
-                    local nearby = false
-                    for _, source in ipairs(centers) do
-                        if typeof(source) == "Vector3"
-                            and horizontalDistance(p, source) <= radius
-                            and math.abs(p.Y - source.Y) <= 80 then
-                            nearby = true
-                            break
-                        end
+        local initialGrace = math.clamp(options.DropGrace or 3, 1.5, 6)
+        local quietPeriod = math.clamp(options.QuietPeriod or 1.4, 0.8, 2.5)
+        local humanoid, root = getHumanoidAndRoot()
+        if not humanoid or humanoid.Health <= 0 or not root then return 0 end
+        if not allowed() then return 0 end
+
+        local previousSpeed = humanoid.WalkSpeed
+        local heading, desiredPoint = Vector3.zero, nil
+        local target = nil
+        local targetSince, bestDistance, improvedAt, nearSince = 0, math.huge, 0, nil
+        local blockedUntil = setmetatable({}, {__mode = "k"})
+        local seen = setmetatable({}, {__mode = "k"})
+        local ownership = setmetatable({}, {__mode = "k"})
+        local firstFound, lastNew, lastResolved = nil, nil, nil
+        local collected, ignored, classified = 0, 0, 0
+        local began = os.clock()
+        local controllerBound = false
+        local ownerFields = {"OwnerUserId", "OwnerId", "UserId", "Owner", "Player"}
+        -- These are only definitive when the token actually exposes an owner.
+        -- Normal BSS 'C' tokens usually do not expose a reliable monster source.
+        local function foreignOwner(part)
+            local cached = ownership[part]
+            if cached ~= nil then return cached end
+            local node = part
+            for depth = 1, 2 do
+                if not node or node == workspace then break end
+                for _,key in ipairs(ownerFields) do
+                    local val = node:GetAttribute(key)
+                    local child = node:FindFirstChild(key)
+                    if val == nil and child and child:IsA("ValueBase") then
+                        val = child.Value
                     end
-                    if nearby and (not field or insideField(field, p, 0)) then
-                        local d = horizontalDistance(p, root.Position)
-                            - (LootTools.IsPriority(part) and 100000 or 0)
-                        if not baseline[part] then
-                            if d < freshScore then fresh, freshScore = part, d end
-                        elseif collectOld and d < oldScore then
-                            existing, oldScore = part, d
+                    if val ~= nil then
+                        if typeof(val) == "Instance" and val:IsA("Player") then
+                            ownership[part] = val ~= player
+                            return ownership[part]
+                        end
+                        local id = tonumber(val)
+                        if id then
+                            ownership[part] = id ~= player.UserId
+                            return ownership[part]
+                        elseif type(val) == "string" and val ~= "" then
+                            local normalized = val:lower()
+                            if normalized == player.Name:lower()
+                                or normalized == player.DisplayName:lower() then
+                                ownership[part] = false
+                                return false
+                            end
                         end
                     end
                 end
-            end)
-            local nearest = fresh
-            if fresh then foundNew = true end
-            -- A combat countdown may start BEFORE the client receives drops.
-            -- Wait for replication before considering nearby older tokens.
-            if not nearest and collectOld and os.clock() - started >= maxWaitForDrops then
-                nearest = existing
+                node = node.Parent
             end
-            if nearest then
-                lastFound = os.clock()
-                tries[nearest] = (tries[nearest] or 0) + 1
-                report("Post-kill loot: seeking " .. nearest.Name .. " (" .. tostring(collected) .. ")")
-                local arrived = LootTools.Walk(groundPosition(nearest.Position), allowed, nearest)
-                if not allowed() then break end
-                if arrived then
-                    task.wait(0.15)
-                    if not nearest.Parent then collected += 1 end
+            ownership[part] = false -- unknown, NOT proof of ownership
+            return false
+        end
+        local function eligible(part)
+            if not part or not part.Parent or baseline[part]
+                or foreignOwner(part) then return false end
+            local p = part.Position
+            if field and not insideField(field, p, 0) then return false end
+            for _,source in ipairs(centers) do
+                if typeof(source) == "Vector3"
+                    and horizontalDistance(p,source) <= radius
+                    and math.abs(p.Y-source.Y) <= 80 then return true end
+            end
+            return false
+        end
+        local function resolveCurrent(now)
+            if not target then return end
+            if not target.Parent then
+                if horizontalDistance(root.Position,desiredPoint or root.Position) <= 2.5 then
+                    collected += 1
                 end
-            else
-                -- Do not exit prematurely while reward tokens are still spawning.
-                if os.clock() - started >= maxWaitForDrops
-                    and os.clock() - lastFound >= (foundNew and quietPeriod or math.max(quietPeriod, 5)) then
-                    break
+                lastResolved = now
+            end
+            target, desiredPoint, nearSince = nil, nil, nil
+        end
+        local function beginTarget(part, now)
+            target = part
+            desiredPoint = groundPosition(part.Position)
+            targetSince, improvedAt = now, now
+            bestDistance = math.huge
+            nearSince = nil
+            report(string.format("Loot: %s | %d confirmed / %d new",
+                options.Source or "reward", collected, classified))
+        end
+        -- Only one BindToRenderStep for the whole sweep; steering never resets
+        -- between tokens and does not produce the walk/stop/walk stutter.
+        local function drive(dt)
+            if not allowed() or humanoid.Health <= 0 or not root.Parent then
+                humanoid:Move(Vector3.zero,false)
+                return
+            end
+            if humanoid.WalkSpeed ~= WalkSpeed then humanoid.WalkSpeed = WalkSpeed end
+            local wanted = Vector3.zero
+            if desiredPoint then
+                local vec = desiredPoint - root.Position
+                local flat = Vector3.new(vec.X,0,vec.Z)
+                if flat.Magnitude > 0.95 then wanted = flat.Unit end
+            end
+            heading = heading:Lerp(wanted,math.clamp(dt*12,0,1))
+            humanoid:Move(heading,false)
+        end
+        local function run()
+            stopWalking()
+            humanoid.WalkSpeed = WalkSpeed
+            -- Only a single combat/planter task is expected to own the loot lock.
+            pcall(function() RunService:UnbindFromRenderStep(bindingName) end)
+            RunService:BindToRenderStep(bindingName,
+                Enum.RenderPriority.Input.Value + 2,drive)
+            controllerBound = true
+            while allowed() and humanoid.Health > 0 and root.Parent
+                and os.clock()-began < duration do
+                local now = os.clock()
+                local best, score = nil, math.huge
+                local actionable = 0
+                LootTools.Each(function(part)
+                    if eligible(part) and (blockedUntil[part] or 0) <= now then
+                        if not seen[part] then
+                            seen[part] = now
+                            firstFound = firstFound or now
+                            lastNew = now
+                            classified += 1
+                        end
+                        actionable += 1
+                        local d = horizontalDistance(root.Position,part.Position)
+                        local candidateScore = d - (LootTools.IsPriority(part) and 24 or 0)
+                        if candidateScore < score then best,score = part,candidateScore end
+                    end
+                end)
+                if target and not target.Parent then
+                    resolveCurrent(now)
+                elseif target and ((blockedUntil[target] or 0) > now or not eligible(target)) then
+                    resolveCurrent(now)
                 end
-                task.wait(0.12)
+                -- Stick to the active token until collected or genuinely stuck.
+                -- A newly spawned token does not make the character zigzag.
+                if not target and best then beginTarget(best,now) end
+                if target then
+                    local distance = horizontalDistance(root.Position,desiredPoint)
+                    if distance < bestDistance - 0.25 then
+                        bestDistance,improvedAt = distance,now
+                    end
+                    if distance <= 1.25 then
+                        nearSince = nearSince or now
+                        if now-nearSince >= 0.65 then
+                            -- This visible C was not picked up despite contact:
+                            -- skip temporarily instead of standing and jittering.
+                            blockedUntil[target] = now + 3.0
+                            ignored += 1
+                            lastResolved = now
+                            target,desiredPoint,nearSince = nil,nil,nil
+                        end
+                    elseif now-improvedAt >= 2.0 or now-targetSince > 5.5 then
+                        blockedUntil[target] = now + 3.0
+                        ignored += 1
+                        lastResolved = now
+                        target,desiredPoint,nearSince = nil,nil,nil
+                    end
+                else
+                    local idleSince = math.max(lastNew or began,lastResolved or began)
+                    -- No drop: short replication grace. Existing bee/field
+                    -- tokens from before the kill are never a reason to wait.
+                    if not firstFound and now-began >= initialGrace then
+                        report("Loot complete: no fresh drops after "
+                            .. string.format("%.1fs",now-began))
+                        break
+                    end
+                    -- Drops were observed: end as soon as all actionable fresh
+                    -- tokens have vanished/been visited and the area stays quiet.
+                    if firstFound and actionable==0 and now-idleSince >= quietPeriod then
+                        report(string.format(
+                            "Loot complete: %d near-contact, %d skipped, %.1fs",
+                            collected,ignored,now-began))
+                        break
+                    end
+                    -- All remaining targets are blocked/uncollectible. Do not
+                    -- wait for the full 48/60s cap; give a short retry window.
+                    if firstFound and actionable>0 and now-idleSince>=2.5 then
+                        report(string.format("Loot exit: %d unreachable token(s)",actionable))
+                        break
+                    end
+                end
+                task.wait(0.10)
             end
         end
+        local ok,err = pcall(run)
+        if controllerBound then
+            pcall(function() RunService:UnbindFromRenderStep(bindingName) end)
+        end
+        if humanoid and humanoid.Parent then
+            humanoid:Move(Vector3.zero,false)
+            humanoid.WalkSpeed = previousSpeed
+        end
+        if not ok then warn("[FieldLab Loot]",err) end
         return collected
     end
 end
@@ -3539,8 +3674,8 @@ do
             if not allowed() then return 0 end
             local total = LootTools.CollectNew({
                 Center = center, Centers = centers, Radius = radius,
-                Duration = coconut and 60 or 48, DropGrace = 9,
-                QuietPeriod = 5.5, Before = before, CollectExisting = true,
+                Duration = coconut and 45 or 32, DropGrace = coconut and 3.8 or 2.8,
+                QuietPeriod = 1.4, Before = before, Source = spawner.Name,
                 -- Do not restrict combat drops to the flower-zone rectangle;
                 -- boss rewards and normal mob rings can spawn at the edge.
                 Allowed = allowed,
@@ -3955,8 +4090,8 @@ do
                         SmoothFlight.Path(latestRoot, {groundPosition(point)}, keepGoing, TweenSpeed)
                     end
                     LootTools.CollectNew({Center=point,Centers=centers,
-                        Radius=80,Duration=55,DropGrace=10,QuietPeriod=5.5,
-                        Before=before,CollectExisting=true,Allowed=keepGoing,
+                        Radius=80,Duration=45,DropGrace=3.8,QuietPeriod=1.4,
+                        Before=before,Source="Windy Bee",Allowed=keepGoing,
                         Report=function(msg) state.LastResult=msg end})
                 end)
                 CombatSignals.LootBusy = false
@@ -6319,7 +6454,8 @@ do
                     setStatus("Đang nhặt token từ planter ...")
                     if center and allowed(epoch) then
                         LootTools.CollectNew({Center = center, Radius = 46, Duration = 28,
-                            Before = before, Field = field and FlowerZones:FindFirstChild(field),
+                            DropGrace = 3.4, QuietPeriod = 1.4,
+                            Before = before, Source = "Planter", Field = field and FlowerZones:FindFirstChild(field),
                             Allowed = function() return allowed(epoch) and not farmEnabled end,
                             Report = setStatus})
                     end
@@ -6749,7 +6885,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.8") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.9") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6810,7 +6946,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.8",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.9",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7291,7 +7427,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.8" then
+    if runtime and runtime.Version == "8.6.9" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
