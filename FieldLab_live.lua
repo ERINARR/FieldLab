@@ -2338,7 +2338,8 @@ do
                 if event.Source and wanted ~= "" and normalized(event.Source) == wanted then
                     local reward = event.Text:match("^(.-)%s*%(%s*[Ff][Rr][Oo][Mm]%s+")
                         or event.Text
-                    table.insert(items,reward:gsub("^%s+",""):gsub("%s+$",""))
+                    local itemText = (reward:gsub("^%s+",""):gsub("%s+$",""))
+                    table.insert(items, itemText)
                 end
                 if event.Defeated and wanted ~= ""
                     and normalized(event.Defeated) == wanted then
