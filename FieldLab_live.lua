@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.12
+-- FIELDLAB_BUILD: 8.6.13
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.12", Ready = false}
+    local runtime = {Version = "8.6.13", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.12 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.13 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.12: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.13: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.12: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.13: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.12: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.13: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -4417,9 +4417,6 @@ do
         local detail=text(page,
             "Waiting for Inventory > Eggs / Robo Pass data. Select a team, then enable.",
             14,280,565,77,12)
-        local liveHint=text(page,
-            "RBC controls intake and ROUND SETUP only. During the timed round, manual Farm/Combat remains available.",
-            14,360,560,43,11)
         local function refresh()
             toggle.Text=state.Enabled and (state.NoPass and "RBC: WAITING PASS" or "AUTO RBC: ON")
                 or "AUTO RBC: OFF"
@@ -7465,7 +7462,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.12") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.13") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -7526,7 +7523,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.12",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.13",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7892,9 +7889,9 @@ do
         end)
 
         accordions("RBC", {
-            {id="RBCControls",title="RBC  /  AUTO CHALLENGE",height=210,
+            {id="RBCControls",title="RBC  /  AUTO CHALLENGE",height=225,
                 open=true,yBase=0,xBase=0},
-            {id="RBCLive",title="LIVE STATUS  /  ROBO BEAR",height=218,
+            {id="RBCLive",title="LIVE STATUS  /  ROBO BEAR",height=235,
                 open=true,yBase=178,xBase=0},
         }, function(obj,x,y)
             return y < 178 and "RBCControls" or "RBCLive"
@@ -8018,7 +8015,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.12" then
+    if runtime and runtime.Version == "8.6.13" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
