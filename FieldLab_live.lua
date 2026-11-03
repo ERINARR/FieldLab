@@ -795,6 +795,10 @@ do
         return ok, err and tostring(err) or nil
     end
 
+    -- RBC may be enabled without the user opening Main. Expose only the same
+    -- vetted Eggs-tab activation, not a guessed inventory remote call.
+    CombatSignals.EnsureInventoryRows = openGameEggsTab
+
     -- Retry a limited number of times only when Main is selected and Inventory
     -- actually has no rows. Once data exists, count/icon updates remain passive.
     task.spawn(function()
@@ -4356,7 +4360,7 @@ do
             Enabled=false, Team="RED", Epoch=0, Status="OFF", Busy=false,
             NextVisit=0, NextInput=0, StartIssuedAt=0, RoundStartedAt=0,
             LastQuest="None", Picked={}, LastRound=0, PassStatus="Unknown",
-            NoPass=false, LastPassCheck=0, CachedPass=nil,
+            NoPass=false, LastPassCheck=0, CachedPass=nil, NextInventoryProbe=0,
         }
         local soft = Color3.fromRGB(164,183,204)
         local raised = Color3.fromRGB(32,44,63)
@@ -4617,10 +4621,17 @@ do
                 return
             end
             if click(start,epoch) then
+                state.NextInput=os.clock()+1.6
+                task.wait(0.35)
+                if not available(epoch) then return end
+                local still=activeScene()
+                if still=="UpgradeSelectScreen" then
+                    setStatus("RBC: START ROUND click sent; awaiting GUI transition")
+                    return
+                end
                 state.RoundStartedAt=os.clock()
-                state.NextInput=os.clock()+2
                 state.LastRound+=1
-                setStatus("RBC: START ROUND pressed. Timed round in progress.")
+                setStatus("RBC: round confirmed; timed round in progress.")
             end
         end
         local function dialogueStep(epoch)
@@ -4751,10 +4762,31 @@ do
                             setStatus("RBC: round started; manual Farm/Combat available")
                         end
                     elseif state.CachedPass==nil then
-                        setStatus("RBC: cannot read Robo Pass yet; open Inventory > Eggs")
+                        setStatus("RBC: reading Robo Pass / loading Eggs inventory")
+                        if now>=state.NextInventoryProbe
+                            and not farmEnabled and not CombatController.IsBusy()
+                            and not CombatSignals.PlanterBusy
+                            and type(CombatSignals.EnsureInventoryRows)=="function" then
+                            state.NextInventoryProbe=now+22
+                            task.spawn(function()
+                                local ok,err=CombatSignals.EnsureInventoryRows()
+                                if not ok and available(epoch) then
+                                    setStatus("RBC: inventory unavailable: "..tostring(err))
+                                end
+                            end)
+                        end
                     elseif state.CachedPass<=0 then
                         state.NoPass=true
                         setStatus("RBC: WAITING PASS (0). Will auto-resume when stocked.")
+                        if now>=state.NextInventoryProbe
+                            and not farmEnabled and not CombatController.IsBusy()
+                            and not CombatSignals.PlanterBusy
+                            and type(CombatSignals.EnsureInventoryRows)=="function" then
+                            state.NextInventoryProbe=now+22
+                            task.spawn(function()
+                                CombatSignals.EnsureInventoryRows()
+                            end)
+                        end
                     elseif state.StartIssuedAt>0
                         and now-state.StartIssuedAt<25 then
                         -- Do not click 'Spend 1 Robo Pass' twice when the game
