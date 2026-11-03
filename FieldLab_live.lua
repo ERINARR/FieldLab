@@ -4091,12 +4091,14 @@ do
         end
         function CombatController.IsBusy()
             return state.Busy or CombatSignals.AntBusy or CombatSignals.ToyBusy
+                or CombatSignals.RBCBusy
         end
         function CombatController.CanPlanterRun()
             -- An explicitly enabled Auto Planter may briefly pause/resume Farm.
             -- A manual Farm click cancels the active planter visit instead.
             return not state.Busy and not state.QuestPriority
                 and not CombatSignals.AntBusy and not CombatSignals.ToyBusy
+                and not CombatSignals.RBCBusy
         end
         function CombatController.PrioritizeQuest(enabled)
             state.QuestPriority = enabled == true
@@ -4362,7 +4364,7 @@ do
         local function text(parent, value, x, y, w, h, sz)
             return ui("TextLabel", {
                 Position=UDim2.fromOffset(x,y),
-                Size=UDim2.new(1,w-590,0,h),
+                Size=UDim2.new(1,-x-20,0,h),
                 BackgroundTransparency=1,
                 Text=value, TextColor3=soft,
                 Font=Enum.Font.Gotham,
@@ -4474,7 +4476,8 @@ do
             state.PassStatus=count==nil and "unknown (open Inventory > Eggs)"
                 or tostring(count).." available"
             state.LastPassCheck=os.clock()
-            state.NoPass=count==0
+            state.NoPass=count==0 and (state.RoundStartedAt==0
+                or os.clock()-state.RoundStartedAt>310)
             refresh()
             return count
         end
@@ -4586,7 +4589,8 @@ do
                 if b and NativeInteraction.Visible(b) then
                     local title=labelText(b,"Text1")
                     local desc=labelText(b,"Text2")
-                    if title~="" and not state.Picked[title] then
+                    if title~="" and (not state.Picked[title]
+                        or os.clock()-state.Picked[title]>2.5) then
                         table.insert(choices,{
                             Button=b,Title=title,Score=beeScore(title.." "..desc)
                         })
@@ -4623,6 +4627,16 @@ do
             local native=playerGui:FindFirstChild("NPC",true)
             if not native or not native:IsA("GuiObject")
                 or not NativeInteraction.Visible(native) then return false end
+            -- The Yes confirmation may overlap the still-visible OptionFrame.
+            -- Confirm first rather than spending another Robo Pass.
+            local yes=button(native,"YesButton")
+            if yes and NativeInteraction.Visible(yes)
+                and state.StartIssuedAt>0
+                and os.clock()-state.StartIssuedAt<25 then
+                setStatus("RBC: confirming Robo Pass start")
+                if click(yes,epoch) then state.NextInput=os.clock()+1 end
+                return true
+            end
             local optionFrame=native:FindFirstChild("OptionFrame")
             if optionFrame and NativeInteraction.Visible(optionFrame) then
                 local opt=button(optionFrame,"Option1")
@@ -4635,7 +4649,8 @@ do
                     end
                 end
                 if opt and raw:lower():find("robo pass",1,true) then
-                    if os.clock()-state.StartIssuedAt<25 then return true end
+                    if state.StartIssuedAt>0
+                        and os.clock()-state.StartIssuedAt<25 then return true end
                     setStatus("RBC: spending 1 Robo Pass (confirmed by NPC option)")
                     if click(opt,epoch) then
                         state.StartIssuedAt=os.clock()
@@ -4644,13 +4659,6 @@ do
                     return true
                 end
                 setStatus("RBC: Robo Pass option not available in NPC dialogue")
-                return true
-            end
-            local yes=button(native,"YesButton")
-            if yes and NativeInteraction.Visible(yes)
-                and os.clock()-state.StartIssuedAt<25 then
-                setStatus("RBC: confirming Robo Pass start")
-                if click(yes,epoch) then state.NextInput=os.clock()+1 end
                 return true
             end
             local box=native:FindFirstChild("TextBox")
@@ -4747,7 +4755,8 @@ do
                     elseif state.CachedPass<=0 then
                         state.NoPass=true
                         setStatus("RBC: WAITING PASS (0). Will auto-resume when stocked.")
-                    elseif now-state.StartIssuedAt<25 then
+                    elseif state.StartIssuedAt>0
+                        and now-state.StartIssuedAt<25 then
                         -- Do not click 'Spend 1 Robo Pass' twice when the game
                         -- has not yet opened the challenge selection UI.
                         setStatus("RBC: waiting for server to open Challenge screen")
