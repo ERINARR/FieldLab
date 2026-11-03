@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.10
+-- FIELDLAB_BUILD: 8.6.11
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.10", Ready = false}
+    local runtime = {Version = "8.6.11", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.10 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.11 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2113,9 +2113,11 @@ end
 
 -- Drive player movement continuously; do not bounce back to center near edges.
 -- Every target is already clamped to the safe interior BEFORE movement begins.
-local function beginWalking(field, token, name)
+local function beginWalking(field, token, name, movementAllowed)
+    -- Loot and Farm share the exact same continuous steering controller.
+    local permitted = movementAllowed or function() return farmValid(token, name) end
     local humanoid, root = getHumanoidAndRoot()
-    if not farmValid(token, name) or humanoid.Health <= 0 then return false end
+    if not permitted() or humanoid.Health <= 0 then return false end
     if walkBound and walkingHumanoid == humanoid then return true end
 
     stopWalking()
@@ -2123,14 +2125,15 @@ local function beginWalking(field, token, name)
     originalWalkSpeed = humanoid.WalkSpeed
     humanoid.WalkSpeed = WalkSpeed
     local heading = Vector3.zero
-    local cf, size = bounds(field)
+    local cf, size = nil, nil
+    if field then cf, size = bounds(field) end
     local hardMargin = cf and math.min(2, safeMargin(size) / 2) or 0
 
     RunService:BindToRenderStep(
         walkBindingName,
         Enum.RenderPriority.Input.Value + 2,
         function(dt)
-            if not farmValid(token, name) or humanoid.Health <= 0 then
+            if not permitted() or humanoid.Health <= 0 then
                 humanoid:Move(Vector3.zero, false)
                 return
             end
@@ -2270,7 +2273,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.10: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.11: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2449,8 +2452,8 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.10: one continuous steering session, not a new walk binding for
-    -- every token. Keep the heading and WalkSpeed across target changes.
+    -- v8.6.11: the same Farm navigator now drives all post-kill/planter loot.
+    -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
         local centers = options.Centers or {center}
@@ -2463,20 +2466,13 @@ do
         local initialGrace = math.clamp(options.DropGrace or 3, 1.5, 6)
         local quietPeriod = math.clamp(options.QuietPeriod or 1.4, 0.8, 2.5)
         local humanoid, root = getHumanoidAndRoot()
-        if not humanoid or humanoid.Health <= 0 or not root then return 0 end
-        if not allowed() then return 0 end
-
-        local previousSpeed = humanoid.WalkSpeed
-        local heading, desiredPoint = Vector3.zero, nil
-        local target = nil
-        local targetSince, bestDistance, improvedAt, nearSince = 0, math.huge, 0, nil
+        if not humanoid or humanoid.Health <= 0 or not root or not allowed() then return 0 end
         local blockedUntil = setmetatable({}, {__mode = "k"})
         local seen = setmetatable({}, {__mode = "k"})
         local ownership = setmetatable({}, {__mode = "k"})
         local firstFound, lastNew, lastResolved = nil, nil, nil
-        local collected, ignored, classified = 0, 0, 0
+        local collected, skipped, classified = 0, 0, 0
         local began = os.clock()
-        local controllerBound = false
         local ownerFields = {"OwnerUserId", "OwnerId", "UserId", "Owner", "Player"}
         -- These are only definitive when the token actually exposes an owner.
         -- Normal BSS 'C' tokens usually do not expose a reliable monster source.
@@ -2528,55 +2524,14 @@ do
             end
             return false
         end
-        local function resolveCurrent(now)
-            if not target then return end
-            if not target.Parent then
-                if horizontalDistance(root.Position,desiredPoint or root.Position) <= 2.5 then
-                    collected += 1
-                end
-                lastResolved = now
-            end
-            target, desiredPoint, nearSince = nil, nil, nil
-        end
-        local function beginTarget(part, now)
-            target = part
-            desiredPoint = groundPosition(part.Position)
-            targetSince, improvedAt = now, now
-            bestDistance = math.huge
-            nearSince = nil
-            report(string.format("Loot: %s | %d confirmed / %d new",
-                options.Source or "reward", collected, classified))
-        end
-        -- Only one BindToRenderStep for the whole sweep; steering never resets
-        -- between tokens and does not produce the walk/stop/walk stutter.
-        local function drive(dt)
-            if not allowed() or humanoid.Health <= 0 or not root.Parent then
-                humanoid:Move(Vector3.zero,false)
-                return
-            end
-            if humanoid.WalkSpeed ~= WalkSpeed then humanoid.WalkSpeed = WalkSpeed end
-            local wanted = Vector3.zero
-            if desiredPoint then
-                local vec = desiredPoint - root.Position
-                local flat = Vector3.new(vec.X,0,vec.Z)
-                if flat.Magnitude > 0.95 then wanted = flat.Unit end
-            end
-            heading = heading:Lerp(wanted,math.clamp(dt*12,0,1))
-            humanoid:Move(heading,false)
-        end
-        local function run()
+        local function sweep()
+            -- The Farm binding stays alive through all token targets; no
+            -- separate RenderStep controller or speed reset per pickup.
             stopWalking()
-            humanoid.WalkSpeed = WalkSpeed
-            -- Only a single combat/planter task is expected to own the loot lock.
-            pcall(function() RunService:UnbindFromRenderStep(bindingName) end)
-            RunService:BindToRenderStep(bindingName,
-                Enum.RenderPriority.Input.Value + 2,drive)
-            controllerBound = true
             while allowed() and humanoid.Health > 0 and root.Parent
-                and os.clock()-began < duration do
+                and os.clock() - began < duration do
                 local now = os.clock()
-                local best, score = nil, math.huge
-                local actionable = 0
+                local nearest, nearestScore, actionable = nil, math.huge, 0
                 LootTools.Each(function(part)
                     if eligible(part) and (blockedUntil[part] or 0) <= now then
                         if not seen[part] then
@@ -2586,106 +2541,90 @@ do
                             classified += 1
                         end
                         actionable += 1
-                        local d = horizontalDistance(root.Position,part.Position)
-                        local candidateScore = d - (LootTools.IsPriority(part) and 24 or 0)
-                        if candidateScore < score then best,score = part,candidateScore end
+                        local distance = horizontalDistance(root.Position, part.Position)
+                        local candidate = distance - (LootTools.IsPriority(part) and 24 or 0)
+                        if candidate < nearestScore then
+                            nearest, nearestScore = part, candidate
+                        end
                     end
                 end)
-                if target and not target.Parent then
-                    resolveCurrent(now)
-                elseif target and ((blockedUntil[target] or 0) > now or not eligible(target)) then
-                    resolveCurrent(now)
-                end
-                -- Stick to the active token until collected or genuinely stuck.
-                -- A newly spawned token does not make the character zigzag.
-                if not target and best then beginTarget(best,now) end
-                if target then
-                    local distance = horizontalDistance(root.Position,desiredPoint)
-                    if distance < bestDistance - 0.25 then
-                        bestDistance,improvedAt = distance,now
+                if nearest then
+                    local targetPosition = groundPosition(nearest.Position)
+                    report(string.format("Farm-style loot: %s | %d picked / %d observed",
+                        options.Source or "Reward", collected, classified))
+                    -- The exact same navigateInField algorithm as Farm:
+                    -- pathfinding, smoothing, jump + obstacle recovery.
+                    local arrived = LootTools.Navigate(targetPosition, allowed, nearest)
+                    if not allowed() then break end
+                    local close = horizontalDistance(root.Position, targetPosition)
+                    if arrived and nearest.Parent and close <= 2.2 then
+                        -- Give the server a short chance to remove the token.
+                        task.wait(0.12)
                     end
-                    if distance <= 1.25 then
-                        nearSince = nearSince or now
-                        if now-nearSince >= 0.65 then
-                            -- This visible C was not picked up despite contact:
-                            -- skip temporarily instead of standing and jittering.
-                            blockedUntil[target] = now + 3.0
-                            ignored += 1
-                            lastResolved = now
-                            target,desiredPoint,nearSince = nil,nil,nil
-                        end
-                    elseif now-improvedAt >= 2.0 or now-targetSince > 5.5 then
-                        blockedUntil[target] = now + 3.0
-                        ignored += 1
-                        lastResolved = now
-                        target,desiredPoint,nearSince = nil,nil,nil
+                    if not nearest.Parent and close <= 5 then
+                        collected += 1
+                    else
+                        blockedUntil[nearest] = os.clock() + (arrived and 2.5 or 4)
+                        skipped += 1
                     end
+                    lastResolved = os.clock()
                 else
-                    local idleSince = math.max(lastNew or began,lastResolved or began)
-                    -- No drop: short replication grace. Existing bee/field
-                    -- tokens from before the kill are never a reason to wait.
-                    if not firstFound and now-began >= initialGrace then
-                        report("Loot complete: no fresh drops after "
-                            .. string.format("%.1fs",now-began))
+                    -- Park while waiting for a delayed reward without going
+                    -- back to the spawner or restarting the walking engine.
+                    walkDestination = nil
+                    local quietFrom = math.max(lastNew or began, lastResolved or began)
+                    if not firstFound and now - began >= initialGrace then
+                        report("Loot done: no new tokens in the reward window")
+                        break
+                    elseif firstFound and actionable == 0
+                        and now - quietFrom >= quietPeriod then
+                        report(string.format("Loot done: %d picked, %d skipped", collected, skipped))
                         break
                     end
-                    -- Drops were observed: end as soon as all actionable fresh
-                    -- tokens have vanished/been visited and the area stays quiet.
-                    if firstFound and actionable==0 and now-idleSince >= quietPeriod then
-                        report(string.format(
-                            "Loot complete: %d near-contact, %d skipped, %.1fs",
-                            collected,ignored,now-began))
-                        break
-                    end
-                    -- All remaining targets are blocked/uncollectible. Do not
-                    -- wait for the full 48/60s cap; give a short retry window.
-                    if firstFound and actionable>0 and now-idleSince>=2.5 then
-                        report(string.format("Loot exit: %d unreachable token(s)",actionable))
-                        break
-                    end
+                    task.wait(0.12)
                 end
-                task.wait(0.10)
             end
         end
-        local ok,err = pcall(run)
-        if controllerBound then
-            pcall(function() RunService:UnbindFromRenderStep(bindingName) end)
-        end
-        if humanoid and humanoid.Parent then
-            humanoid:Move(Vector3.zero,false)
-            humanoid.WalkSpeed = previousSpeed
-        end
-        if not ok then warn("[FieldLab Loot]",err) end
+        local ok, err = pcall(sweep)
+        -- Release shared movement ownership only once, after the sweep.
+        stopWalking()
+        if not ok then warn("[FieldLab Farm-style Loot]", err) end
         return collected
     end
 end
 
 -- Commit to the current destination, and change targets only after arrival,
 -- disappearance or an actual blockage. Never interrupt every 0.35 seconds.
-local function navigateInField(field, destination, token, name, targetPart, flameObject, crosshairObject, dupedObject)
-    if not beginWalking(field, token, name) then return false end
+local function navigateInField(field, destination, token, name, targetPart, flameObject, crosshairObject, dupedObject, movementAllowed)
+    local looting = type(movementAllowed) == "function"
+    local permitted = movementAllowed or function() return farmValid(token, name) end
+    if not beginWalking(field, token, name, permitted) then return false end
     local humanoid, root = getHumanoidAndRoot()
-    destination = projectInside(field, destination,
-        (crosshairObject or dupedObject) and 0.3 or (flameObject and 2 or nil))
+    if field then
+        destination = projectInside(field, destination,
+            (crosshairObject or dupedObject) and 0.3 or (flameObject and 2 or nil))
+    elseif not looting then
+        return false
+    end
     if not destination then return false end
-    if combatFarmUnsafe(destination, 3) then
+    if not looting and combatFarmUnsafe(destination, 3) then
         walkDestination = nil
         if targetPart then collectibleCooldown[targetPart] = os.clock() + 2.5 end
         return false
     end
     if horizontalDistance(root.Position, destination) <=
-        ((crosshairObject or dupedObject) and 1.15 or (flameObject and 1.4 or 2.8)) then
+        (looting and 1.25 or ((crosshairObject or dupedObject) and 1.15 or (flameObject and 1.4 or 2.8))) then
         return true
     end
 
     for attempt = 1, 2 do
-        if not farmValid(token, name) then return false end
+        if not permitted() then return false end
         -- Precise Bee outranks ongoing collectible, patrol and Flame movements.
-        if not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
+        if not looting and not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
             walkDestination = nil
             return false
         end
-        if not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
+        if not looting and not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
             and hasPreciseCrosshair(field) then
             walkDestination = nil
             return false
@@ -2699,7 +2638,9 @@ local function navigateInField(field, destination, token, name, targetPart, flam
             walkDestination = nil
             return false
         end
-        if targetPart and not tokenInsideField(field, targetPart) then return false end
+        if looting and targetPart and not targetPart.Parent then return true end
+        if targetPart and (not targetPart.Parent
+            or (not looting and not tokenInsideField(field, targetPart))) then return false end
         if flameObject and (not FlameHeatSettings.Enabled or not liveFlame(field, flameObject)) then
             walkDestination = nil
             return false
@@ -2734,7 +2675,7 @@ local function navigateInField(field, destination, token, name, targetPart, flam
             -- Pathfinding can leave the area to go around a nearby wall;
             -- reject those paths instead of chasing collectibles beyond the field.
             for _, wp in ipairs(waypointList) do
-                if not insideField(field, wp.Position, 1.5) then
+                if not looting and not insideField(field, wp.Position, 1.5) then
                     path:Destroy()
                     return false
                 end
@@ -2770,15 +2711,17 @@ local function navigateInField(field, destination, token, name, targetPart, flam
             local recoveryJumpAt = 0
             local jumped = false
             local threshold = (waypointIndex == #waypointList)
-                and ((crosshairObject or dupedObject) and 1.15 or (flameObject and 1.5 or 2.6)) or 3.4
+                and (looting and 1.25
+                    or ((crosshairObject or dupedObject) and 1.15 or (flameObject and 1.5 or 2.6)))
+                or 3.4
 
-            while farmValid(token, name) do
+            while permitted() do
                 if humanoid.Health <= 0 or blockedAhead then break end
-                if not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
+                if not looting and not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
                     blockedAhead = true
                     break
                 end
-                if not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
+                if not looting and not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
                     and hasPreciseCrosshair(field) then
                     blockedAhead = true
                     break
@@ -2792,7 +2735,8 @@ local function navigateInField(field, destination, token, name, targetPart, flam
                     blockedAhead = true
                     break
                 end
-                if targetPart and not tokenInsideField(field, targetPart) then break end
+                if targetPart and (not targetPart.Parent
+                    or (not looting and not tokenInsideField(field, targetPart))) then break end
                 if flameObject then
                     if not FlameHeatSettings.Enabled or not liveFlame(field, flameObject) then break end
                 end
@@ -2822,7 +2766,7 @@ local function navigateInField(field, destination, token, name, targetPart, flam
                 end
                 task.wait(0.05)
             end
-            if not farmValid(token, name) then arrived = false; break end
+            if not permitted() then arrived = false; break end
             if flameObject and (not FlameHeatSettings.Enabled or not liveFlame(field, flameObject)) then
                 arrived = false
                 break
@@ -2831,7 +2775,12 @@ local function navigateInField(field, destination, token, name, targetPart, flam
                 arrived = false
                 break
             end
-            if blockedAhead or (targetPart and not tokenInsideField(field, targetPart))
+            if looting and targetPart and not targetPart.Parent then
+                arrived = true
+                break
+            end
+            if blockedAhead or (targetPart and (not targetPart.Parent
+                or (not looting and not tokenInsideField(field, targetPart))))
                 or horizontalDistance(root.Position, target) > threshold then
                 arrived = false
                 break
@@ -2841,12 +2790,12 @@ local function navigateInField(field, destination, token, name, targetPart, flam
 
         if blockedConnection then blockedConnection:Disconnect() end
         if path then path:Destroy() end
-        if not farmValid(token, name) then return false end
-        if not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
+        if not permitted() then return false end
+        if not looting and not (dupedObject and isSmileDuped(dupedObject)) and hasSmileDuped(field) then
             walkDestination = nil
             return false
         end
-        if not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
+        if not looting and not crosshairObject and not (dupedObject and isSmileDuped(dupedObject))
             and hasPreciseCrosshair(field) then
             walkDestination = nil
             return false
@@ -2860,19 +2809,29 @@ local function navigateInField(field, destination, token, name, targetPart, flam
             walkDestination = nil
             return false
         end
-        if targetPart and not tokenInsideField(field, targetPart) then return false end
+        if looting and targetPart and not targetPart.Parent then return true end
+        if targetPart and (not targetPart.Parent
+            or (not looting and not tokenInsideField(field, targetPart))) then return false end
         if flameObject and (not FlameHeatSettings.Enabled or not liveFlame(field, flameObject)) then
             walkDestination = nil
             return false
         end
         if arrived or horizontalDistance(root.Position, destination) <=
-            ((crosshairObject or dupedObject) and 1.35 or (flameObject and 1.7 or 3)) then
+            (looting and 1.45
+                or ((crosshairObject or dupedObject) and 1.35 or (flameObject and 1.7 or 3))) then
             return true
         end
         -- Only replan after confirmed obstruction or being stuck; at most once.
     end
     return false
 end
+-- Loot reuses Farm's actual smooth humanoid movement, waypoints, obstacle
+-- checks, jump recovery and two-attempt replanning. No artificial Field
+-- clipping, because post-kill drops can land outside a flower patch.
+LootTools.Navigate = function(destination, allowed, tokenPart)
+    return navigateInField(nil, destination, 0, "", tokenPart, nil, nil, nil, allowed)
+end
+
 -- Fly using one physics constraint to the selected field, then walk normally.
 local function goToField(field, token, name)
     if not farmValid(token, name) then return false end
@@ -7001,7 +6960,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.10") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.11") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -7062,7 +7021,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.10",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.11",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7543,7 +7502,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.10" then
+    if runtime and runtime.Version == "8.6.11" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
