@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.13
+-- FIELDLAB_BUILD: 8.6.14
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.13", Ready = false}
+    local runtime = {Version = "8.6.14", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.13 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.14 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.13: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.14: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.13: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.14: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.13: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.14: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -4360,6 +4360,7 @@ do
             Enabled=false, Team="RED", Epoch=0, Status="OFF", Busy=false,
             NextVisit=0, NextInput=0, StartIssuedAt=0, RoundStartedAt=0,
             LastQuest="None", Picked={}, LastRound=0, PassStatus="Unknown",
+            RoundText="", QuestProgress="", LastRoundLog=0,
             NoPass=false, LastPassCheck=0, CachedPass=nil, NextInventoryProbe=0,
         }
         local soft = Color3.fromRGB(164,183,204)
@@ -4416,7 +4417,7 @@ do
         local status=text(page,"RBC disabled",14,219,565,54,13)
         local detail=text(page,
             "Waiting for Inventory > Eggs / Robo Pass data. Select a team, then enable.",
-            14,280,565,77,12)
+            14,280,565,101,12)
         local function refresh()
             toggle.Text=state.Enabled and (state.NoPass and "RBC: WAITING PASS" or "AUTO RBC: ON")
                 or "AUTO RBC: OFF"
@@ -4428,10 +4429,11 @@ do
             passLabel.Text="Robo Pass: "..state.PassStatus
             status.Text=state.Status
             detail.Text=string.format(
-                "Team: %s   |   Last Quest: %s\n%s",
+                "Team: %s   |   Last Quest: %s\n%s%s",
                 state.Team,state.LastQuest,
                 state.NoPass and "Paused. Will restart automatically when inventory reports a Robo Pass."
-                    or "Quest choice -> Bee selection -> Start Round; does not spend Cogs.")
+                    or "Quest choice -> Bee selection -> Start Round; no Cog purchases.",
+                state.RoundText~="" and ("\n"..state.RoundText) or "")
         end
         local function setStatus(message)
             state.Status=message
@@ -4606,7 +4608,7 @@ do
             end
             setStatus("RBC: selecting "..pick.Title.." ["..state.Team.."]")
             if click(pick.Button,epoch) then
-                state.Picked[pick.Title]=true
+                state.Picked[pick.Title]=os.clock()
                 state.NextInput=os.clock()+0.65
             end
         end
@@ -4630,6 +4632,48 @@ do
                 state.LastRound+=1
                 setStatus("RBC: round confirmed; timed round in progress.")
             end
+        end
+        -- Active challenge HUD discovered from Dex:
+        -- ChallengeInfo > RBCChallengeInfo > MainFrame > TaskFrame >
+        -- ProgressBar1/2/3 > TextLabel, plus RoundLabel, TimeLabel, CogsLabel.
+        -- Seeing the HUD is stronger proof of a started round than a click.
+        local function observeRound()
+            local outer=playerGui:FindFirstChild("RBCChallengeInfo",true)
+            if not outer then return false end
+            local main=outer:FindFirstChild("MainFrame",true)
+            if not main or not NativeInteraction.Visible(main) then return false end
+            local round=labelText(main,"RoundLabel")
+            local timer=labelText(main,"TimeLabel")
+            local cogs=labelText(main,"CogsLabel")
+            if not round:lower():find("round",1,true)
+                or not timer:lower():find("time",1,true) then return false end
+            local remaining=timer:match("(%d+)%s*:%s*(%d+)")
+            if remaining then
+                local minutes,seconds=timer:match("(%d+)%s*:%s*(%d+)")
+                if tonumber(minutes)*60+tonumber(seconds)<=0 then return false end
+            end
+            local now=os.clock()
+            if state.RoundStartedAt==0 or now-state.RoundStartedAt>330 then
+                state.RoundStartedAt=now
+                state.StartIssuedAt=0
+            end
+            local frame=main:FindFirstChild("TaskFrame",true)
+            local tasks={}
+            for index=1,3 do
+                local progress=frame and frame:FindFirstChild("ProgressBar"..index,true)
+                if progress and NativeInteraction.Visible(progress) then
+                    local label=progress:FindFirstChild("TextLabel",true)
+                    local name=label and label:IsA("TextLabel") and label.Text or ""
+                    if name~="" then table.insert(tasks,name) end
+                end
+            end
+            state.RoundText=round.."  |  "..timer.."  |  "..cogs
+                ..(#tasks>0 and ("\n"..table.concat(tasks,"  |  ")) or "")
+            if now-state.LastRoundLog>3 then
+                state.LastRoundLog=now
+                setStatus("RBC round active: "..round.." / "..timer)
+            end
+            return true
         end
         local function dialogueStep(epoch)
             local native=playerGui:FindFirstChild("NPC",true)
@@ -4736,8 +4780,12 @@ do
         local function cycle(epoch)
             while available(epoch) do
                 local now=os.clock()
+                local activeRound=observeRound()
                 local scene,frame=activeScene()
-                if scene then
+                if activeRound then
+                    CombatSignals.RBCBusy=false
+                    -- Do not consume another pass while Round HUD is active.
+                elseif scene then
                     CombatSignals.RBCBusy=true
                     if not state.Busy and now>=state.NextInput then
                         if scene=="QuestSelectScreen" then
@@ -4813,6 +4861,7 @@ do
             state.NoPass=false
             state.RoundStartedAt=0
             state.StartIssuedAt=0
+            state.RoundText=""
             state.NextVisit=0
             CombatSignals.RBCBusy=false
             if not state.Enabled then
@@ -7462,7 +7511,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.13") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.14") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -7523,7 +7572,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.13",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.14",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -8015,7 +8064,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.13" then
+    if runtime and runtime.Version == "8.6.14" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
