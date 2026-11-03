@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.9
+-- FIELDLAB_BUILD: 8.6.10
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.9", Ready = false}
+    local runtime = {Version = "8.6.10", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.9 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.10 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2270,6 +2270,95 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
+    -- FieldLab v8.6.10: watch native Alerts > AlertBox text during a fight.
+    -- These messages appear AFTER the server grants a reward. They identify
+    -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
+    -- that reward before collection. Connections are disconnected per fight.
+    function LootTools.BeginAlertTracker()
+        local tracker = {Events = {}, Connections = {}, Seen = setmetatable({}, {__mode = "k"}),
+            Active = true, Root = nil}
+        local function normalized(value)
+            return tostring(value or ""):lower():gsub("[^%w]","")
+                :gsub("spawner",""):gsub("monster",""):gsub("%d+$","")
+        end
+        local function record(message)
+            if not tracker.Active then return end
+            local clean = tostring(message or ""):gsub("^%s+",""):gsub("%s+$","")
+            if clean == "" then return end
+            local source = clean:match("%(%s*[Ff][Rr][Oo][Mm]%s+([^%)]+)%)")
+            local defeated = clean:match("[Dd]efeated%s+([^!]+)!")
+            if not source and not defeated then return end
+            table.insert(tracker.Events, {
+                Text = clean, Source = source, Defeated = defeated, At = os.clock(),
+            })
+            if #tracker.Events > 90 then table.remove(tracker.Events, 1) end
+        end
+        local function isAlertLabel(node)
+            if not node:IsA("TextLabel") then return false end
+            if node.Name == "AlertBox" then return true end
+            local parent = node.Parent
+            return parent and parent.Name == "AlertBox"
+        end
+        local function watch(node, existing)
+            if not isAlertLabel(node) or tracker.Seen[node] ~= nil then return end
+            tracker.Seen[node] = node.Text
+            if not existing then record(node.Text) end
+            table.insert(tracker.Connections,
+                node:GetPropertyChangedSignal("Text"):Connect(function()
+                    if not tracker.Active then return end
+                    local msg = node.Text
+                    if tracker.Seen[node] == msg then return end
+                    tracker.Seen[node] = msg
+                    record(msg)
+                end))
+        end
+        local function bindRoot(root)
+            if tracker.Root == root then return end
+            tracker.Root = root
+            watch(root, true)
+            for _,obj in ipairs(root:GetDescendants()) do watch(obj, true) end
+            table.insert(tracker.Connections, root.DescendantAdded:Connect(function(node)
+                watch(node, false)
+            end))
+        end
+        local existingRoot = playerGui:FindFirstChild("Alerts", true)
+        if existingRoot then bindRoot(existingRoot) end
+        table.insert(tracker.Connections,playerGui.DescendantAdded:Connect(function(node)
+            if not tracker.Active then return end
+            if node.Name == "Alerts" then
+                bindRoot(node)
+            elseif tracker.Root and node:IsDescendantOf(tracker.Root) then
+                watch(node, false)
+            end
+        end))
+        function tracker:Summary(expectedSource)
+            local wanted = normalized(expectedSource)
+            local items, victory = {}, false
+            for _,event in ipairs(self.Events) do
+                if event.Source and wanted ~= "" and normalized(event.Source) == wanted then
+                    local reward = event.Text:match("^(.-)%s*%(%s*[Ff][Rr][Oo][Mm]%s+")
+                        or event.Text
+                    table.insert(items,reward:gsub("^%s+",""):gsub("%s+$",""))
+                end
+                if event.Defeated and wanted ~= ""
+                    and normalized(event.Defeated) == wanted then
+                    victory = true
+                end
+            end
+            local preview={}
+            for i=1,math.min(#items,5) do preview[i]=items[i] end
+            return #items,table.concat(preview,", "),victory
+        end
+        function tracker:Stop()
+            if not self.Active then return end
+            self.Active=false
+            for _,connection in ipairs(self.Connections) do
+                pcall(function() connection:Disconnect() end)
+            end
+            table.clear(self.Connections)
+        end
+        return tracker
+    end
     function LootTools.Walk(target, permitted, targetPart)
         if not permitted() then return false end
         local humanoid, root = getHumanoidAndRoot()
@@ -2359,7 +2448,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.9: one continuous steering session, not a new walk binding for
+    -- v8.6.10: one continuous steering session, not a new walk binding for
     -- every token. Keep the heading and WalkSpeed across target changes.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -3165,6 +3254,7 @@ do
         local state = {
             Enabled = false, Selected = {}, RunId = 0, Busy = false,
             CurrentTween = nil, RetryAt = {}, LastResult = "Select monsters to hunt.",
+            LastRewardText = "Reward alerts: none yet",
             CombatMaxSeconds = 70, QuestPriority = false,
             ManualFarm = false, StumpStoppedByUser = false,
             CombatFarmToken = nil, Hover = nil, HoverAttachment = nil,
@@ -3875,6 +3965,7 @@ do
                 return false, "Farm has movement priority"
             end
             state.Busy = true
+            local rewardAlerts = LootTools.BeginAlertTracker()
             -- Only newly appearing tokens near THIS spawner count as fight loot.
             local lootBaseline = not isStump(spawner) and LootTools.Snapshot() or nil
             -- Quest-owned fights may pause their quest Farm; independent fights do not.
@@ -3958,6 +4049,19 @@ do
                     warn("[BSS Combat Loot]", lootError)
                     state.LastResult = "Loot error: " .. tostring(lootError)
                 end
+            end
+            -- Native reward notifications are a stronger attribution signal
+            -- than token position. Ignore "from Pine Tree Forest" and other
+            -- unrelated field rewards when summarizing this monster fight.
+            local alertCount,rewardPreview,victoryAlert = rewardAlerts:Summary(typeOf(spawner))
+            rewardAlerts:Stop()
+            if alertCount > 0 then
+                state.LastRewardText = string.format("Reward alerts [%s]: %s%s",
+                    typeOf(spawner),rewardPreview,
+                    alertCount>5 and (" (+"..(alertCount-5).." more)") or "")
+            elseif victoryAlert then
+                state.LastRewardText = "Defeated " .. typeOf(spawner)
+                    .. " (no source-specific reward alert observed)"
             end
             -- Don't override manual Farm movement when its control was reclaimed.
             if not farmEnabled then
@@ -4061,6 +4165,7 @@ do
             if not point or state.Busy then return false end
             if os.clock() < (state.RetryAt["__WindyBee"] or 0) then return false end
             state.Busy = true
+            local rewardAlerts = LootTools.BeginAlertTracker()
             local before = LootTools.Snapshot()
             local ok, result = pcall(function()
                 state.LastResult = "Wild Windy Bee: approaching"
@@ -4099,6 +4204,14 @@ do
                 state.LastResult = "Windy Bee: reward sweep finished"
             elseif not ok then
                 warn("[BSS Windy Combat]",result)
+            end
+            local n,rewardPreview,victory = rewardAlerts:Summary("Windy Bee")
+            rewardAlerts:Stop()
+            if n > 0 then
+                state.LastRewardText = "Reward alerts [Windy Bee]: " .. rewardPreview
+                    .. (n>5 and (" (+"..(n-5).." more)") or "")
+            elseif victory then
+                state.LastRewardText = "Defeated Windy Bee (reward alert not yet observed)"
             end
             state.RetryAt["__WindyBee"] = os.clock()+12
             state.Busy = false
@@ -4184,8 +4297,9 @@ do
                     end
                     status.Text = CombatSignals.AntBusy
                         and ("ANT CHALLENGE | " .. tostring(CombatSignals.AntStatus))
-                        or string.format("Selected: %d | %s\n%s",
-                            amount, combatStatus, state.LastResult)
+                        or string.format("Selected: %d | %s\n%s\n%s",
+                            amount, combatStatus, state.LastResult,
+                            state.LastRewardText or "Reward alerts: none yet")
                 end
                 task.wait(0.6)
             end
@@ -6885,7 +6999,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.9") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.10") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6946,7 +7060,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.9",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.10",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7427,7 +7541,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.9" then
+    if runtime and runtime.Version == "8.6.10" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
