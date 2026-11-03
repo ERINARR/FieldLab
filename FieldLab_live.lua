@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.2
+-- FIELDLAB_BUILD: 8.6.3
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.2", Ready = false}
+    local runtime = {Version = "8.6.3", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.2 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.3 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -51,7 +51,7 @@ local currentHiveTween = nil
 local currentFarmTravelTween = nil
 local hiveBusy = true
 -- Combat is defined after the Farm UI. These callbacks give manual controls priority.
-local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false}
+local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false, Sprinkler = {Enabled = false, LastField = nil, LastAt = 0, RetryAt = 0, LastCharacter = nil}}
 
 -- v7.7: One physics-based flight controller shared by Hive / Farm / Combat / Quest.
 -- Avoid several HumanoidRootPart CFrame tweens fighting physics or each other.
@@ -995,13 +995,26 @@ local function circleToggle(x, label)
         Position = UDim2.fromOffset(21, 0), Size = UDim2.fromOffset(85, 22),
         BackgroundTransparency = 1, Text = label, TextColor3 = white,
         TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold,
-        TextSize = 17, ZIndex = 8
+        TextSize = (label == "Sprinkler") and 14 or 17, ZIndex = 8
     }, hit)
     return hit, function(state) dot.Visible = state end
 end
 
 local farmHit, paintFarm = circleToggle(164, "Farm")
 local clickHit, paintClick = circleToggle(271, "click")
+-- Third compact Quick Farm toggle. Scoped so this does not consume extra
+-- top-level Luau local registers.
+do
+    local sprinklerHit, paintSprinkler = circleToggle(381, "Sprinkler")
+    CombatSignals.PaintSprinkler = paintSprinkler
+    sprinklerHit.Activated:Connect(function()
+        local setting = CombatSignals.Sprinkler
+        setting.Enabled = not setting.Enabled
+        setting.LastField = nil
+        setting.RetryAt = 0
+        paintSprinkler(setting.Enabled)
+    end)
+end
 
 -- FARM PAGE: SECTION DIVIDERS + FLAMES/BUBBLE MULTI-SELECT LOCK.
 local separatorColor = Color3.fromRGB(109, 109, 109)
@@ -1314,6 +1327,7 @@ ConfigManager.Register("Farm", function()
         FlameHeat = FlameHeatSettings.Enabled,
         PreciseBee = PreciseSettings.Enabled,
         DigitalBee = DigitalSettings.Enabled,
+        Sprinkler = CombatSignals.Sprinkler.Enabled,
     }
 end, function(data)
     local fly, walk = tonumber(data.FlySpeed), tonumber(data.WalkSpeed)
@@ -1339,6 +1353,14 @@ end, function(data)
     if type(data.FlameHeat) == "boolean" then FlameHeatSettings.Enabled = data.FlameHeat end
     if type(data.PreciseBee) == "boolean" then PreciseSettings.Enabled = data.PreciseBee end
     if type(data.DigitalBee) == "boolean" then DigitalSettings.Enabled = data.DigitalBee end
+    if type(data.Sprinkler) == "boolean" then
+        CombatSignals.Sprinkler.Enabled = data.Sprinkler
+        CombatSignals.Sprinkler.LastField = nil
+        CombatSignals.Sprinkler.RetryAt = 0
+    end
+    if CombatSignals.PaintSprinkler then
+        CombatSignals.PaintSprinkler(CombatSignals.Sprinkler.Enabled)
+    end
     facingDot.Visible = LockSettings.Enabled
     heatDot.Visible = FlameHeatSettings.Enabled
     preciseDot.Visible = PreciseSettings.Enabled
@@ -2582,6 +2604,54 @@ local function goToField(field, token, name)
     end)
 end
 
+-- One sprinkler placement after arriving at the current field's center.
+-- This is invoked by the Farm coroutine, so it cannot wrestle movement from
+-- that same farm job. Calls the game's Sprinkler Builder item once, never in
+-- a tight loop. The server may still reject the action (not owned/cooldown).
+do
+    function CombatSignals.PlaceSprinkler(field, token, name)
+        local setting = CombatSignals.Sprinkler
+        if not setting.Enabled or not farmValid(token, name) then return end
+        local now = os.clock()
+        if setting.LastCharacter ~= player.Character then
+            setting.LastCharacter = player.Character
+            setting.LastField = nil
+            setting.RetryAt = 0
+        end
+        if setting.LastField == name or now < setting.RetryAt then return end
+        local center = fieldCenter(field)
+        if not center then setting.RetryAt = now + 12; return end
+        -- Protect against repeated attempts if the remote is missing or blocked.
+        setting.RetryAt = now + 18
+        local _, root = getHumanoidAndRoot()
+        if horizontalDistance(root.Position, center) > 3.8 then
+            stopWalking()
+            if not goToField(field, token, name) then return end
+        end
+        if not farmValid(token, name) or not setting.Enabled then return end
+        _, root = getHumanoidAndRoot()
+        if horizontalDistance(root.Position, center) > 5.0 or not onField(field, root) then
+            return
+        end
+        local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+        local remote = events and events:FindFirstChild("PlayerActivesCommand")
+        if not remote or not remote:IsA("RemoteEvent") then
+            warn("[FieldLab Sprinkler] Events.PlayerActivesCommand not available")
+            return
+        end
+        local ok, err = pcall(function()
+            remote:FireServer({Name = "Sprinkler Builder"})
+        end)
+        if ok then
+            setting.LastField = name
+            setting.LastAt = os.clock()
+            print("[FieldLab Sprinkler] Placement requested at center of " .. name)
+        else
+            warn("[FieldLab Sprinkler] " .. tostring(err))
+        end
+    end
+end
+
 -- Target Practice can show all marks together or stagger them.
 -- After the third touch, stand at its position until the final mark disappears (shot)
 -- or until a bounded timeout. We do not assume client visuals expose a shot event.
@@ -2733,6 +2803,16 @@ local function runFarm(token)
             end
             previousField = name
             patrolIndex = 1
+            -- Re-entered after leaving this field: request a new placement
+            -- only if at least 90 seconds passed since the previous request.
+            local sprinkler = CombatSignals.Sprinkler
+            if sprinkler.LastField == name and os.clock() - sprinkler.LastAt >= 90 then
+                sprinkler.LastField = nil
+            end
+        end
+
+        if farmValid(token, name) then
+            CombatSignals.PlaceSprinkler(field, token, name)
         end
 
         if farmValid(token, name) then
@@ -2852,6 +2932,9 @@ farmHit.Activated:Connect(function()
     farmEnabled = true
     farmToken += 1
     preciseProgress = nil
+    -- Each new manual Farm session has its own sprinkler placement.
+    CombatSignals.Sprinkler.LastField = nil
+    CombatSignals.Sprinkler.RetryAt = 0
     local token = farmToken
     paintFarm(true)
     task.spawn(function()
@@ -6213,7 +6296,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.2") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.3") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6274,7 +6357,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.2",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.3",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -6610,8 +6693,7 @@ do
         end
 
         accordions("Farm", {
-            {id="Quick",title="01  QUICK FARM",height=90,open=true,yBase=0,xBase=0,
-             info="Chọn field và bật Farm.",infoX=390},
+            {id="Quick",title="01  QUICK FARM",height=90,open=true,yBase=0,xBase=0},
             {id="Precise",title="02  PRECISE BEE",height=218,open=true,yBase=53,xBase=290,
              hideTitles={["PRECISE BEE"]=true},
              info="Ưu tiên ba Crosshair liên tiếp, giữ ở điểm cuối chờ bắn.",infoX=290},
@@ -6752,7 +6834,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.2" then
+    if runtime and runtime.Version == "8.6.3" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
