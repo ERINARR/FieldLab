@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.14
+-- FIELDLAB_BUILD: 8.6.15
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.14", Ready = false}
+    local runtime = {Version = "8.6.15", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.14 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.15 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.14: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.15: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.14: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.15: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.14: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.15: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -4362,6 +4362,15 @@ do
             LastQuest="None", Picked={}, LastRound=0, PassStatus="Unknown",
             RoundText="", QuestProgress="", LastRoundLog=0,
             NoPass=false, LastPassCheck=0, CachedPass=nil, NextInventoryProbe=0,
+            Options={AutoFarm=true,AutoCombat=true,AutoUpgrades=true,
+                AutoDrives=false,ReserveCogs=3,MaxUpgrades=2,
+                PreferredDrive="TEAM",MaxDriveBuys=1},
+            OwnFarmToken=nil, OwnField=nil, LastField=nil,
+            Round=0, LastRoundAction=0, LastScene="", LastTask="",
+            LastShopAction=0, LastUpgradeAction=0, BoughtUpgrades=0,
+            LastUpgradeName="", UpgradesInRound={}, DriveBuys=0,
+            HuntNext=0, HuntRunning=false, LastHud=0, LastTaskLog=0,
+            LastRoundMenu=0,
         }
         local soft = Color3.fromRGB(164,183,204)
         local raised = Color3.fromRGB(32,44,63)
@@ -4418,6 +4427,87 @@ do
         local detail=text(page,
             "Waiting for Inventory > Eggs / Robo Pass data. Select a team, then enable.",
             14,280,565,101,12)
+
+        -- Controls use native FieldLab page and persist with ConfigManager.
+        local options=state.Options
+        local subhead=text(page,"ROUND AUTOMATION",14,385,565,22,13)
+        subhead.Font=Enum.Font.GothamBold
+        local optionButtons={}
+        local function optionSwitch(name,key,x,y)
+            local btn=ui("TextButton",{
+                Name="RBC_"..key,Position=UDim2.fromOffset(x,y),
+                Size=UDim2.fromOffset(221,29),BackgroundColor3=raised,
+                BorderSizePixel=0,Text="",TextColor3=Color3.fromRGB(242,245,252),
+                Font=Enum.Font.GothamBold,TextSize=11,ZIndex=6,
+            },page)
+            ui("UICorner",{CornerRadius=UDim.new(0,5)},btn)
+            optionButtons[key]={Button=btn,Title=name}
+            btn.Activated:Connect(function()
+                options[key]=not options[key]
+                btn.Text=name..": "..(options[key] and "ON" or "OFF")
+                btn.BackgroundColor3=options[key] and onColor or raised
+            end)
+        end
+        optionSwitch("AUTO FARM","AutoFarm",14,413)
+        optionSwitch("RBC COMBAT","AutoCombat",252,413)
+        optionSwitch("AUTO UPGRADES","AutoUpgrades",14,449)
+        optionSwitch("AUTO BUY DRIVES","AutoDrives",252,449)
+        local driveButton=ui("TextButton",{
+            Name="RBCDrivePriority",Position=UDim2.fromOffset(14,488),
+            Size=UDim2.fromOffset(221,28),BorderSizePixel=0,
+            BackgroundColor3=raised,Font=Enum.Font.GothamBold,
+            TextSize=11,TextColor3=Color3.fromRGB(240,246,255),
+            Text="DRIVE: TEAM",ZIndex=6,
+        },page)
+        ui("UICorner",{CornerRadius=UDim.new(0,5)},driveButton)
+        driveButton.Activated:Connect(function()
+            local list={"TEAM","RED","BLUE","WHITE","GLITCHED"}
+            for index,name in ipairs(list) do
+                if name==options.PreferredDrive then
+                    options.PreferredDrive=list[index%#list+1]
+                    break
+                end
+            end
+            driveButton.Text="DRIVE: "..options.PreferredDrive
+        end)
+        local function numberControl(title,key,x,y,minv,maxv)
+            text(page,title,x,y,95,23,11)
+            local val=ui("TextBox",{
+                Name="RBC_"..key,Position=UDim2.fromOffset(x+112,y-3),
+                Size=UDim2.fromOffset(76,26),BackgroundColor3=raised,
+                BorderSizePixel=0,Text=tostring(options[key]),
+                ClearTextOnFocus=false,Font=Enum.Font.GothamBold,
+                TextSize=12,TextColor3=Color3.fromRGB(240,246,255),ZIndex=6,
+            },page)
+            ui("UICorner",{CornerRadius=UDim.new(0,4)},val)
+            val.FocusLost:Connect(function()
+                options[key]=math.clamp(math.floor(tonumber(val.Text) or options[key]),minv,maxv)
+                val.Text=tostring(options[key])
+            end)
+            return val
+        end
+        local reserveEntry=numberControl("COGS RESERVE","ReserveCogs",252,491,0,500)
+        local capEntry=numberControl("MAX UPGRADES / ROUND","MaxUpgrades",14,529,0,10)
+        local driveCapEntry=numberControl("MAX DRIVES / ROUND","MaxDriveBuys",252,529,0,10)
+        local guide=text(page,
+            "Uses Farm navigation for pollen tasks and shared Loot navigation for monsters. "..
+            "RBC pauses ordinary Quest/Combat. Drive purchase only when a verified native shop "..
+            "item and purchase button are visible; never clicks QUIT.",
+            14,567,565,79,11)
+        guide.TextColor3=Color3.fromRGB(167,187,207)
+        local lastDecision=text(page,"Decision: waiting for challenge",14,651,565,88,12)
+        local function paintOptions()
+            for key,row in pairs(optionButtons) do
+                row.Button.Text=row.Title..": "..(options[key] and "ON" or "OFF")
+                row.Button.BackgroundColor3=options[key] and onColor or raised
+            end
+            driveButton.Text="DRIVE: "..options.PreferredDrive
+            reserveEntry.Text=tostring(options.ReserveCogs)
+            capEntry.Text=tostring(options.MaxUpgrades)
+            driveCapEntry.Text=tostring(options.MaxDriveBuys)
+        end
+        paintOptions()
+
         local function refresh()
             toggle.Text=state.Enabled and (state.NoPass and "RBC: WAITING PASS" or "AUTO RBC: ON")
                 or "AUTO RBC: OFF"
@@ -4427,6 +4517,10 @@ do
                 b.Text=(state.Team==team and "● " or "")..team
             end
             passLabel.Text="Robo Pass: "..state.PassStatus
+            lastDecision.Text=string.format(
+                "Round: %d | Cogs reserve: %d | Upgrades bought: %d\n%s",
+                state.Round,options.ReserveCogs,state.BoughtUpgrades,
+                state.LastTask~="" and state.LastTask or "Monitoring NPC / native GUI")
             status.Text=state.Status
             detail.Text=string.format(
                 "Team: %s   |   Last Quest: %s\n%s%s",
@@ -4540,6 +4634,9 @@ do
                 end
             end
             local reward=tonumber(lower:match("reward:%s*(%d+)%s*cogs")) or 0
+            if lower:find("defeat",1,true) then score-=22 end
+            if lower:find("mechsquito",1,true) or lower:find("cogmower",1,true) then score-=35 end
+            if lower:find("collect",1,true) then score+=12 end
             return score+math.min(reward,30)*0.5
         end
         local beeColor={
@@ -4548,7 +4645,7 @@ do
             spicy="RED",crimson="RED",festive="RED",
             bumble="BLUE",cool="BLUE",bubble="BLUE",bucko="BLUE",
             frosty="BLUE",diamond="BLUE",ninja="BLUE",
-            buoyant="BLUE",tadpole="BLUE",cobalt="BLUE",vicious="BLUE",
+            buoyant="BLUE",tadpole="BLUE",cobalt="BLUE",
         }
         local function beeScore(raw)
             local name=raw:lower():match("([%a]+)%s+bee") or ""
@@ -4612,6 +4709,89 @@ do
                 state.NextInput=os.clock()+0.65
             end
         end
+
+        -- Native UpgradeSelectScreen > ButtonFrame > Button1..4.
+        -- Only buy after reading the displayed Cog cost, never guess a remote.
+        local upgrades={
+            ["credit"]=85,["botnet"]=86,["beebay"]=82,
+            ["optimize"]=94,["expansion"]=72,["the cloud"]=79,
+            ["iterate"]=44,["equalize"]=77,["sharpen"]=61,
+            ["fission"]=66,["gpu"]=50,["blue screen"]=72,
+            ["bluetooth"]=88,["bruteforce"]=86,
+            ["fluid simulation"]=76,["overclock"]=77,
+            ["torrent"]=65,["codec"]=41,["homepage"]=36,
+            ["crypto"]=34,["trojan"]=49,["stack overflow"]=65,
+            ["overfit: red"]=66,["overfit: blue"]=66,
+            ["overfit: white"]=66,["rgb"]=57,["wifi"]=64,
+        }
+        local teamBoost={
+            RED={["bruteforce"]=48,["overfit: red"]=45,["sharpen"]=14,["furnace"]=35},
+            BLUE={["bluetooth"]=48,["overfit: blue"]=45,["blue screen"]=34},
+            WHITE={["fluid simulation"]=48,["overfit: white"]=42,["white noise"]=25},
+        }
+        local function cogAmount()
+            local box=getBox()
+            local raw=labelText(box,"CogsTxt")
+            if raw=="" then
+                local outer=playerGui:FindFirstChild("RBCChallengeInfo",true)
+                local main=outer and outer:FindFirstChild("MainFrame",true)
+                raw=labelText(main,"CogsLabel")
+            end
+            return tonumber((raw:gsub(",","")):match("(%d+)"))
+        end
+        local function upgradeName(raw)
+            return (raw:match("%[([^%]]+)%]") or raw:match("^%s*([^%d]+)"))
+                :lower():gsub("^%s+",""):gsub("%s+$","")
+        end
+        local function buyUpgrade(scene,epoch)
+            if not options.AutoUpgrades
+                or state.BoughtUpgrades>=options.MaxUpgrades
+                or os.clock()-state.LastUpgradeAction<1.35 then return false end
+            local frame=scene:FindFirstChild("ButtonFrame",true)
+            if not frame then return false end
+            local cogs=cogAmount()
+            if not cogs then return false end
+            local picks={}
+            for i=1,4 do
+                local b=button(frame,"Button"..i)
+                if b and NativeInteraction.Visible(b) then
+                    local name=upgradeName(labelText(b,"TextTitle"))
+                    local costRaw=labelText(b,"TextCost")
+                    local cost=tonumber((costRaw:gsub(",","")):match("(%d+)%s*[Cc]og"))
+                        or tonumber((costRaw:gsub(",","")):match("(%d+)"))
+                    local desc=labelText(b,"TextBuffs")
+                    local cap=tonumber(labelText(b,"TextTitle"):match("[Mm]ax%s*(%d+)"))
+                    local lvl=tonumber(labelText(b,"TextTitle"):match("[Ll][Vv][Ll]%s*(%d+)"))
+                    if name~="" and cost and cost>=0
+                        and cogs-cost>=options.ReserveCogs
+                        and not (cap and lvl and lvl>cap) then
+                        local score=(upgrades[name] or 25)+(teamBoost[state.Team][name] or 0)
+                        if state.Round<=5 and (name=="credit" or name=="botnet"
+                            or name=="beebay") then score+=30 end
+                        if name=="crypto" or name=="gpu" or name=="furnace" then
+                            score-=25 -- avoid negative Cog economy by default
+                        end
+                        score-=math.max(0,cost-5)*1.9
+                        table.insert(picks,{Button=b,Name=name,Cost=cost,Score=score,Desc=desc})
+                    end
+                end
+            end
+            table.sort(picks,function(a,b)return a.Score>b.Score end)
+            if #picks==0 then return false end
+            local p=picks[1]
+            state.LastUpgradeAction=os.clock()
+            if click(p.Button,epoch) then
+                state.BoughtUpgrades+=1
+                state.LastUpgradeName=p.Name
+                state.LastTask=string.format("Upgrade: %s / %d Cogs / score %.1f",
+                    p.Name,p.Cost,p.Score)
+                state.NextInput=os.clock()+1.3
+                setStatus("RBC: buying "..p.Name.." (Cog balance "..cogs..")")
+                return true
+            end
+            return false
+        end
+
         local function startRound(epoch)
             local box=getBox()
             local start=button(box,"StartRoundButton")
@@ -4653,6 +4833,12 @@ do
                 if tonumber(minutes)*60+tonumber(seconds)<=0 then return false end
             end
             local now=os.clock()
+            local parsedRound=tonumber(round:match("(%d+)"))
+            if parsedRound and parsedRound~=state.Round then
+                state.Round=parsedRound
+                state.BoughtUpgrades=0
+                state.DriveBuys=0
+            end
             if state.RoundStartedAt==0 or now-state.RoundStartedAt>330 then
                 state.RoundStartedAt=now
                 state.StartIssuedAt=0
@@ -4675,6 +4861,305 @@ do
             end
             return true
         end
+
+        -- RBC round engine: reuse the SAME existing runFarm(), navigateInField()
+        -- and LootTools.Navigate(). Never start another movement controller.
+        local function endOwnedFarm()
+            local owned=state.OwnFarmToken
+            state.OwnFarmToken=nil
+            state.OwnField=nil
+            if owned and farmToken==owned and farmEnabled then
+                farmEnabled=false
+                farmToken+=1
+                preciseProgress=nil
+                if currentFarmTravelTween then
+                    currentFarmTravelTween:Cancel()
+                    currentFarmTravelTween=nil
+                end
+                stopWalking()
+                paintFarm(false)
+            end
+        end
+        local function beginOwnedFarm(fieldName,epoch)
+            local field=FlowerZones:FindFirstChild(fieldName)
+            if not field or not options.AutoFarm then return false end
+            if state.OwnFarmToken==farmToken and state.OwnField==fieldName
+                and farmEnabled then return true end
+            endOwnedFarm()
+            -- RBC owns movement while round HUD is visible. A quest/farm
+            -- coroutine can only be stopped via farmToken, not CFrame writes.
+            if farmEnabled then
+                farmEnabled=false
+                farmToken+=1
+                stopWalking()
+                if currentFarmTravelTween then
+                    currentFarmTravelTween:Cancel()
+                    currentFarmTravelTween=nil
+                end
+                paintFarm(false)
+            end
+            if not state.LastField then state.LastField=selectedField end
+            selectedField=fieldName
+            fieldButton.Text=fieldIconName(fieldName).." "..fieldName
+            farmEnabled=true
+            farmToken+=1
+            preciseProgress=nil
+            local owned=farmToken
+            state.OwnFarmToken=owned
+            state.OwnField=fieldName
+            paintFarm(true)
+            task.spawn(function()
+                local ok,err=pcall(runFarm,owned)
+                if not ok then warn("[FieldLab RBC Farm]",err) end
+                if farmToken==owned then
+                    farmEnabled=false
+                    farmToken+=1
+                    paintFarm(false)
+                    stopWalking()
+                    state.OwnFarmToken=nil
+                    state.OwnField=nil
+                end
+            end)
+            state.LastTask="RBC Farm: "..fieldName
+            return true
+        end
+        local function taskField(raw)
+            local lower=raw:lower()
+            local chosen=nil
+            for _,field in ipairs(fieldObjects) do
+                if lower:find(field.Name:lower(),1,true)
+                    and (not chosen or #field.Name>#chosen.Name) then
+                    chosen=field
+                end
+            end
+            if chosen then return chosen.Name end
+            local color=lower:find("red pollen",1,true) and "RED"
+                or (lower:find("blue pollen",1,true) and "BLUE")
+                or (lower:find("white pollen",1,true) and "WHITE")
+                or state.Team
+            local defaults={
+                RED={"Pepper Patch","Rose Field","Strawberry Field","Mushroom Field"},
+                BLUE={"Pine Tree Forest","Bamboo Field","Blue Flower Field"},
+                WHITE={"Coconut Field","Spider Field","Pineapple Patch",
+                    "Dandelion Field","Sunflower Field"},
+            }
+            for _,name in ipairs(defaults[color]) do
+                if FlowerZones:FindFirstChild(name) then return name end
+            end
+            return selectedField
+        end
+        local function liveTasks()
+            local outer=playerGui:FindFirstChild("RBCChallengeInfo",true)
+            local main=outer and outer:FindFirstChild("MainFrame",true)
+            local frame=main and main:FindFirstChild("TaskFrame",true)
+            local result={}
+            if not frame then return result end
+            for i=1,3 do
+                local bar=frame:FindFirstChild("ProgressBar"..i,true)
+                if bar and NativeInteraction.Visible(bar) then
+                    local label=bar:FindFirstChild("TextLabel",true)
+                    local raw=label and label:IsA("TextLabel") and label.Text or ""
+                    if raw~="" then
+                        local fill=bar:FindFirstChild("FillBar",true)
+                        local frac=fill and fill:IsA("GuiObject")
+                            and fill.Size.X.Scale or 0
+                        local lower=raw:lower()
+                        local n,d=(lower:gsub(",","")):match("(%d+)%s*/%s*(%d+)")
+                        local done=lower:find("complete",1,true)~=nil
+                            or (n and d and tonumber(d)>0 and tonumber(n)>=tonumber(d))
+                            or frac>=0.985
+                        table.insert(result,{Text=raw,Done=done==true,Progress=frac,
+                            Index=i})
+                    end
+                end
+            end
+            return result
+        end
+        local function findRBCMob(raw)
+            local query=raw:lower()
+            local wanted=query:find("mega mechsquito",1,true) and "megameschsquito"
+                or (query:find("mechsquito",1,true) and "mechsquito")
+                or (query:find("cogmower",1,true) and "cogmower")
+                or nil
+            if not wanted then return nil,nil end
+            local monsters=workspace:FindFirstChild("Monsters")
+            if not monsters then return nil,nil end
+            local _,root=getHumanoidAndRoot()
+            if not root then return nil,nil end
+            local best,bestDist,bestPoint=nil,math.huge,nil
+            for _,m in ipairs(monsters:GetDescendants()) do
+                if m:IsA("Model") then
+                    local nm=m.Name:lower():gsub("[^%a]","")
+                    local target=wanted=="megameschsquito" and
+                        (nm:find("mega",1,true) and nm:find("mechsquito",1,true))
+                        or (wanted=="mechsquito"
+                            and nm:find("mechsquito",1,true)
+                            and not nm:find("mega",1,true))
+                        or (wanted=="cogmower" and nm:find("cogmower",1,true))
+                    if target then
+                        local h=m:FindFirstChildOfClass("Humanoid")
+                        if not h or h.Health>0 then
+                            local p=m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart",true)
+                            if p then
+                                local dist=(p.Position-root.Position).Magnitude
+                                if dist<bestDist then best,bestDist,bestPoint=m,dist,p.Position end
+                            end
+                        end
+                    end
+                end
+            end
+            return best,bestPoint
+        end
+        local function combatTask(raw,epoch)
+            if not options.AutoCombat then return false end
+            local taskLower=raw:lower()
+            if not (taskLower:find("defeat",1,true)
+                or taskLower:find("kill",1,true)) then return false end
+            if state.HuntRunning then return true end
+            if os.clock()<state.HuntNext then return false end
+            local mob,point=findRBCMob(raw)
+            local spawner=nil
+            if not mob then
+                spawner=select(1,CombatController.FindForTask(raw))
+            end
+            if not mob and not spawner then
+                state.HuntNext=os.clock()+2.5
+                state.LastTask="RBC mobs not spawned yet; farming remaining tasks"
+                return false
+            end
+            endOwnedFarm()
+            state.HuntRunning=true
+            state.HuntNext=os.clock()+4
+            task.spawn(function()
+                local ok,err=pcall(function()
+                    local permitted=function()
+                        return available(epoch) and state.RoundStartedAt>0
+                            and not (state.OwnFarmToken and farmEnabled)
+                    end
+                    if mob and point then
+                        local _,root=getHumanoidAndRoot()
+                        if not root then return end
+                        local dir=root.Position-point
+                        local flat=Vector3.new(dir.X,0,dir.Z)
+                        local reach=flat.Magnitude>0.1 and flat.Unit*11
+                            or Vector3.new(11,0,0)
+                        state.LastTask="RBC monster: "..mob.Name
+                        LootTools.Navigate(groundPosition(point+reach),permitted,nil)
+                        -- Pause near the live monster so bees can attack.
+                        local untilTime=os.clock()+3
+                        while permitted() and mob.Parent and os.clock()<untilTime do
+                            task.wait(0.25)
+                        end
+                    elseif spawner then
+                        state.LastTask="RBC combat: "..spawner.Name
+                        CombatController.FightQuest(spawner,permitted)
+                    end
+                end)
+                if not ok then warn("[FieldLab RBC Mob]",err) end
+                stopWalking()
+                state.HuntRunning=false
+            end)
+            return true
+        end
+        local function handleRound(epoch)
+            CombatSignals.RBCBusy=true -- block competing auto movements in round
+            if os.clock()-state.LastRoundAction<0.65 then return end
+            state.LastRoundAction=os.clock()
+            local tasks=liveTasks()
+            if #tasks==0 then
+                state.LastTask="RBC HUD active; waiting for task bars"
+                return
+            end
+            local pending={}
+            for _,t in ipairs(tasks) do
+                if not t.Done then table.insert(pending,t) end
+            end
+            if #pending==0 then
+                endOwnedFarm()
+                state.LastTask="Tasks appear complete; waiting for server round transition"
+                setStatus("RBC: all displayed tasks complete; waiting, NOT clicking QUIT")
+                return
+            end
+            local active=nil
+            -- Prefer attainable field objectives; attack live RBC monsters first.
+            for _,t in ipairs(pending) do
+                local l=t.Text:lower()
+                if (l:find("defeat",1,true) or l:find("kill",1,true))
+                    and options.AutoCombat then
+                    local mob=select(1,findRBCMob(t.Text))
+                    if mob then active=t;break end
+                end
+            end
+            if not active then
+                for _,t in ipairs(pending) do
+                    local l=t.Text:lower()
+                    if not (l:find("defeat",1,true) or l:find("kill",1,true)) then
+                        active=t;break
+                    end
+                end
+            end
+            if not active then active=pending[1] end
+            if active then
+                local lower=active.Text:lower()
+                if (lower:find("defeat",1,true) or lower:find("kill",1,true))
+                    and options.AutoCombat then
+                    combatTask(active.Text,epoch)
+                elseif options.AutoFarm and not state.HuntRunning then
+                    local field=taskField(active.Text)
+                    if field then
+                        beginOwnedFarm(field,epoch)
+                        state.LastTask="Round "..state.Round..": "..active.Text
+                            .." -> "..field
+                    else state.LastTask="No suitable field: "..active.Text end
+                end
+            end
+        end
+        -- Shop adapter intentionally uses native GUI text & buttons only.
+        -- It will not spoof unverified server remotes or click a blind purchase.
+        local function tryDriveFromOpenShop(epoch)
+            if not options.AutoDrives or options.MaxDriveBuys<=state.DriveBuys
+                or os.clock()-state.LastShopAction<3.0 then return false end
+            local drive=options.PreferredDrive=="TEAM" and state.Team
+                or options.PreferredDrive
+            local needle=drive:lower().." drive"
+            local label=nil
+            for _,obj in ipairs(playerGui:GetDescendants()) do
+                if obj:IsA("TextLabel") and NativeInteraction.Visible(obj)
+                    and obj.Text:lower():find(needle,1,true) then
+                    label=obj
+                    break
+                end
+            end
+            if not label then return false end
+            local panel=label.Parent
+            for i=1,4 do
+                if not panel then break end
+                local cogs=cogAmount()
+                if cogs and cogs<options.ReserveCogs then return false end
+                for _,item in ipairs(panel:GetDescendants()) do
+                    if item:IsA("GuiButton") and NativeInteraction.Visible(item) then
+                        local t=item:IsA("TextButton") and item.Text:lower() or ""
+                        for _,txt in ipairs(item:GetDescendants()) do
+                            if txt:IsA("TextLabel") then t=t.." "..txt.Text:lower() end
+                        end
+                        local buy=t:find("buy",1,true) or t:find("craft",1,true)
+                        local blocked=t:find("can't afford",1,true)
+                            or t:find("capacity exceeded",1,true)
+                        if buy and not blocked then
+                            state.LastShopAction=os.clock()
+                            state.LastTask="Drive: attempting "..drive.." from verified shop panel"
+                            if click(item,epoch) then
+                                state.DriveBuys+=1
+                                return true
+                            end
+                        end
+                    end
+                end
+                panel=panel.Parent
+            end
+            return false
+        end
+
         local function dialogueStep(epoch)
             local native=playerGui:FindFirstChild("NPC",true)
             if not native or not native:IsA("GuiObject")
@@ -4783,24 +5268,48 @@ do
                 local activeRound=observeRound()
                 local scene,frame=activeScene()
                 if activeRound then
-                    CombatSignals.RBCBusy=false
-                    -- Do not consume another pass while Round HUD is active.
+                    state.LastHud=now
+                    if state.RoundStartedAt==0 then state.RoundStartedAt=now end
+                    handleRound(epoch)
+                    -- All other auto movement is suspended during RBC.
                 elseif scene then
+                    endOwnedFarm()
+                    state.HuntRunning=false
                     CombatSignals.RBCBusy=true
+                    if state.LastScene~=scene then
+                        if scene=="QuestSelectScreen" then
+                            state.BoughtUpgrades=0
+                            state.DriveBuys=0
+                            state.UpgradesInRound={}
+                            state.RoundStartedAt=0
+                            state.LastTask="Selecting next RBC quest"
+                        end
+                        state.LastScene=scene
+                    end
                     if not state.Busy and now>=state.NextInput then
                         if scene=="QuestSelectScreen" then
                             chooseQuest(frame,epoch)
                         elseif scene=="BeeSelectScreen" then
                             chooseBee(frame,epoch)
                         elseif scene=="UpgradeSelectScreen" then
-                            startRound(epoch)
+                            if not buyUpgrade(frame,epoch) then
+                                startRound(epoch)
+                            end
                         else
                             setStatus("RBC: end screen visible; no automatic purchases")
                         end
                     end
                 else
-                    CombatSignals.RBCBusy=false
+                    if now-state.LastHud<4 then
+                        CombatSignals.RBCBusy=true
+                    else
+                        CombatSignals.RBCBusy=false
+                        endOwnedFarm()
+                    end
                     if now-state.LastPassCheck>=3.0 then readPass() end
+                    if not activeRound and now-state.LastHud>4 then
+                        tryDriveFromOpenShop(epoch)
+                    end
                     if state.RoundStartedAt>0 and now-state.RoundStartedAt<310 then
                         -- After Start Round we must never spend another Pass
                         -- while the current five-minute challenge is running.
@@ -4846,6 +5355,7 @@ do
                 end
                 task.wait(0.48)
             end
+            endOwnedFarm()
             CombatSignals.RBCBusy=false
             state.Busy=false
         end
@@ -4865,7 +5375,9 @@ do
             state.NextVisit=0
             CombatSignals.RBCBusy=false
             if not state.Enabled then
+                endOwnedFarm()
                 SmoothFlight.Cancel()
+                stopWalking()
                 setStatus("RBC disabled")
                 return
             end
@@ -4881,12 +5393,36 @@ do
             end)
         end)
         ConfigManager.Register("RBC",function()
-            return {Team=state.Team}
+            local stored={Team=state.Team}
+            for key,value in pairs(options) do stored[key]=value end
+            return stored
         end,function(data)
             if data.Team=="RED" or data.Team=="BLUE" or data.Team=="WHITE" then
                 state.Team=data.Team
             end
+            for _,key in ipairs({"AutoFarm","AutoCombat","AutoUpgrades","AutoDrives"}) do
+                if type(data[key])=="boolean" then options[key]=data[key] end
+            end
+            for _,def in ipairs({
+                {"ReserveCogs",0,500},{"MaxUpgrades",0,10},{"MaxDriveBuys",0,10},
+            }) do
+                if tonumber(data[def[1]]) then
+                    options[def[1]]=math.clamp(math.floor(tonumber(data[def[1]])),def[2],def[3])
+                end
+            end
+            if data.PreferredDrive=="TEAM" or data.PreferredDrive=="RED"
+                or data.PreferredDrive=="BLUE" or data.PreferredDrive=="WHITE"
+                or data.PreferredDrive=="GLITCHED" then
+                options.PreferredDrive=data.PreferredDrive
+            end
+            paintOptions()
             refresh()
+        end)
+        screen.Destroying:Connect(function()
+            state.Enabled=false
+            state.Epoch+=1
+            endOwnedFarm()
+            CombatSignals.RBCBusy=false
         end)
         refresh()
     end
@@ -7511,7 +8047,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.14") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.15") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -7572,7 +8108,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.14",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.15",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -8064,7 +8600,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.14" then
+    if runtime and runtime.Version == "8.6.15" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
