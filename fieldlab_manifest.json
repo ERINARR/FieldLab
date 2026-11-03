@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "version": "8.6.11",
+  "version": "8.6.12",
   "script": "FieldLab_live.lua",
-  "sha256": "cc0167d997014c6f34e47ff826eae8198e558b396afb7033310381df49605d8e",
+  "sha256": "1a1304d5d7620c2d119e96198981f7a71ca30ca4edeb2e608c6811415f201cc3",
   "updated_at": "2026-11-03"
 }
