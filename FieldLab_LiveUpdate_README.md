@@ -17,9 +17,8 @@
 
 1. Tạo repo GitHub do bạn quản lý, công khai hoặc có phân phối HTTPS riêng bạn tin cậy.
 2. Upload `FieldLab_live.lua` và `fieldlab_manifest.json` ở cùng thư mục root hoặc branch.
-3. Sửa biến `REMOTE_BASE` nằm đầu `FieldLab_QuickStart.lua` thành URL chính xác có dạng:
-   `https://raw.githubusercontent.com/TEN_TAI_KHOAN/TEN_REPO/main`
-4. Chạy loader đã chỉnh một lần. Từ đó mỗi khi có mã nguồn mới, cập nhật file và manifest trên repo để Roblox tự nhận, không cần chạy lại loader.
+3. Repo này đã cấu hình sẵn `REMOTE_BASE = "https://raw.githubusercontent.com/ERINARR/FieldLab/main"` trong `FieldLab_QuickStart.lua`. Không cần chỉnh URL.
+4. Chạy `FieldLab_QuickStart.lua` trong repo này một lần. Khi có bản mới, commit `FieldLab_live.lua` và cập nhật `fieldlab_manifest.json` cùng phiên bản và SHA-256 để loader nhận bản mới.
 
 **Lưu ý:** Tao không có quyền tự tải code lên GitHub hoặc vào Roblox của mày. Các file tải trong ChatGPT không tự xuất hiện trên máy hay repo.
 
