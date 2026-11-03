@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.16
+-- FIELDLAB_BUILD: 8.6.17
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.16", Ready = false}
+    local runtime = {Version = "8.6.17", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.16 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.17 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.16: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.17: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.16: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.17: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.16: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.17: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -5182,49 +5182,73 @@ do
             return false
         end
 
+        -- NPC is a ScreenGui according to Dex; it is not a GuiObject.
+        -- Never reject the root UI solely on its Roblox class.
         local function dialogueStep(epoch)
             local native=playerGui:FindFirstChild("NPC",true)
-            if not native or not native:IsA("GuiObject")
-                or not NativeInteraction.Visible(native) then return false end
-            -- The Yes confirmation may overlap the still-visible OptionFrame.
-            -- Confirm first rather than spending another Robo Pass.
+            if not native then return false end
+            if native:IsA("ScreenGui") then
+                if not native.Enabled then return false end
+            elseif native:IsA("GuiObject") then
+                if not NativeInteraction.Visible(native) then return false end
+            else
+                return false
+            end
+
+            -- YesButton must run BEFORE the pass-pending wait branch.
             local yes=button(native,"YesButton")
-            if yes and NativeInteraction.Visible(yes)
-                and state.StartIssuedAt>0
-                and os.clock()-state.StartIssuedAt<25 then
-                setStatus("RBC: confirming Robo Pass start")
-                if click(yes,epoch) then state.NextInput=os.clock()+1 end
+            if state.StartIssuedAt>0 and yes and NativeInteraction.Visible(yes) then
+                setStatus("RBC: confirming start using 1 Robo Pass")
+                if click(yes,epoch) then
+                    state.NextInput=os.clock()+1.0
+                    state.LastTask="Confirmed Robo Pass dialogue"
+                end
                 return true
             end
-            local optionFrame=native:FindFirstChild("OptionFrame")
+
+            local optionFrame=native:FindFirstChild("OptionFrame",true)
             if optionFrame and NativeInteraction.Visible(optionFrame) then
                 local opt=button(optionFrame,"Option1")
                 local raw=labelText(optionFrame,"Option1")
-                -- The option itself may have Text or a nested TextLabel.
                 if opt then
-                    raw=(raw.." "..(opt:IsA("TextButton") and opt.Text or ""))
+                    raw=raw.." "..(opt:IsA("TextButton") and opt.Text or "")
                     for _,child in ipairs(opt:GetDescendants()) do
-                        if child:IsA("TextLabel") then raw=raw.." "..child.Text end
+                        if child:IsA("TextLabel") or child:IsA("TextButton") then
+                            raw=raw.." "..child.Text
+                        end
                     end
                 end
-                if opt and raw:lower():find("robo pass",1,true) then
-                    if state.StartIssuedAt>0
-                        and os.clock()-state.StartIssuedAt<25 then return true end
-                    setStatus("RBC: spending 1 Robo Pass (confirmed by NPC option)")
+                if opt and NativeInteraction.Visible(opt)
+                    and raw:lower():find("robo pass",1,true) then
+                    if state.StartIssuedAt>0 then
+                        setStatus("RBC: Pass selected; awaiting confirmation")
+                        return true
+                    end
+                    setStatus("RBC: choosing Spend 1 Robo Pass")
                     if click(opt,epoch) then
                         state.StartIssuedAt=os.clock()
-                        state.NextInput=os.clock()+0.8
+                        state.NextInput=os.clock()+0.9
+                        state.LastTask="Selected Spend 1 Robo Pass"
                     end
                     return true
                 end
-                setStatus("RBC: Robo Pass option not available in NPC dialogue")
+                setStatus("RBC: waiting for Robo Pass option / Option1 text")
                 return true
             end
-            local box=native:FindFirstChild("TextBox")
+
+            -- Welcome User, Robo Bear introduction, Click to continue.
+            -- Try the game's clickable overlay first, otherwise TextBox.
+            local box=native:FindFirstChild("TextBox",true)
             if box and NativeInteraction.Visible(box) then
-                if click(box,epoch) then
-                    state.NextInput=os.clock()+0.45
-                    setStatus("RBC: advancing Robo Bear dialogue")
+                local overlay=native:FindFirstChild("ButtonOverlay",true)
+                local target=overlay and overlay:IsA("GuiButton")
+                    and NativeInteraction.Visible(overlay) and overlay or box
+                if click(target,epoch) then
+                    state.NextInput=os.clock()+0.65
+                    state.LastTask="Advancing Robo Bear dialogue"
+                    setStatus("RBC: advancing dialogue (click to continue)")
+                else
+                    setStatus("RBC: dialogue visible, click failed")
                 end
                 return true
             end
@@ -5364,13 +5388,11 @@ do
                                 CombatSignals.EnsureInventoryRows()
                             end)
                         end
-                    elseif state.StartIssuedAt>0
-                        and now-state.StartIssuedAt<25 then
-                        -- Do not click 'Spend 1 Robo Pass' twice when the game
-                        -- has not yet opened the challenge selection UI.
-                        setStatus("RBC: waiting for server to open Challenge screen")
-                    elseif dialogueStep(epoch) then
-                        -- Existing Robo Bear dialogue, handle native GUI first.
+                    elseif now>=state.NextInput and dialogueStep(epoch) then
+                        -- NPC may still require Yes confirmation after Pass choice.
+                    elseif state.StartIssuedAt>0 then
+                        -- Never spend a second Robo Pass if the server is slow.
+                        setStatus("RBC: awaiting Challenge UI after Pass confirmation")
                     elseif now>=state.NextVisit then
                         approach(epoch)
                     end
@@ -8070,7 +8092,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.16") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.17") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -8131,7 +8153,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.16",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.17",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -8623,7 +8645,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.16" then
+    if runtime and runtime.Version == "8.6.17" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
