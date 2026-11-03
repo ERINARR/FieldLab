@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.15
+-- FIELDLAB_BUILD: 8.6.16
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.15", Ready = false}
+    local runtime = {Version = "8.6.16", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.15 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.16 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.15: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.16: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.15: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.16: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.15: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.16: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -4363,7 +4363,7 @@ do
             RoundText="", QuestProgress="", LastRoundLog=0,
             NoPass=false, LastPassCheck=0, CachedPass=nil, NextInventoryProbe=0,
             Options={AutoFarm=true,AutoCombat=true,AutoUpgrades=true,
-                AutoDrives=false,ReserveCogs=3,MaxUpgrades=2,
+                AutoClick=true,AutoDrives=false,ReserveCogs=3,MaxUpgrades=2,
                 PreferredDrive="TEAM",MaxDriveBuys=1},
             OwnFarmToken=nil, OwnField=nil, LastField=nil,
             Round=0, LastRoundAction=0, LastScene="", LastTask="",
@@ -4452,8 +4452,9 @@ do
         optionSwitch("RBC COMBAT","AutoCombat",252,413)
         optionSwitch("AUTO UPGRADES","AutoUpgrades",14,449)
         optionSwitch("AUTO BUY DRIVES","AutoDrives",252,449)
+        optionSwitch("AUTO CLICK","AutoClick",14,485)
         local driveButton=ui("TextButton",{
-            Name="RBCDrivePriority",Position=UDim2.fromOffset(14,488),
+            Name="RBCDrivePriority",Position=UDim2.fromOffset(252,485),
             Size=UDim2.fromOffset(221,28),BorderSizePixel=0,
             BackgroundColor3=raised,Font=Enum.Font.GothamBold,
             TextSize=11,TextColor3=Color3.fromRGB(240,246,255),
@@ -4486,16 +4487,16 @@ do
             end)
             return val
         end
-        local reserveEntry=numberControl("COGS RESERVE","ReserveCogs",252,491,0,500)
-        local capEntry=numberControl("MAX UPGRADES / ROUND","MaxUpgrades",14,529,0,10)
-        local driveCapEntry=numberControl("MAX DRIVES / ROUND","MaxDriveBuys",252,529,0,10)
+        local reserveEntry=numberControl("COGS RESERVE","ReserveCogs",252,530,0,500)
+        local capEntry=numberControl("MAX UPGRADES","MaxUpgrades",14,530,0,10)
+        local driveCapEntry=numberControl("MAX DRIVES","MaxDriveBuys",14,568,0,10)
         local guide=text(page,
             "Uses Farm navigation for pollen tasks and shared Loot navigation for monsters. "..
             "RBC pauses ordinary Quest/Combat. Drive purchase only when a verified native shop "..
             "item and purchase button are visible; never clicks QUIT.",
-            14,567,565,79,11)
+            14,608,565,65,11)
         guide.TextColor3=Color3.fromRGB(167,187,207)
-        local lastDecision=text(page,"Decision: waiting for challenge",14,651,565,88,12)
+        local lastDecision=text(page,"Decision: waiting for challenge",14,692,565,88,12)
         local function paintOptions()
             for key,row in pairs(optionButtons) do
                 row.Button.Text=row.Title..": "..(options[key] and "ON" or "OFF")
@@ -4745,8 +4746,10 @@ do
         end
         local function buyUpgrade(scene,epoch)
             if not options.AutoUpgrades
-                or state.BoughtUpgrades>=options.MaxUpgrades
-                or os.clock()-state.LastUpgradeAction<1.35 then return false end
+                or state.BoughtUpgrades>=options.MaxUpgrades then return false end
+            if os.clock()-state.LastUpgradeAction<1.55 then
+                return true -- UI is still settling, don't press Start Round
+            end
             local frame=scene:FindFirstChild("ButtonFrame",true)
             if not frame then return false end
             local cogs=cogAmount()
@@ -4908,6 +4911,19 @@ do
             state.OwnFarmToken=owned
             state.OwnField=fieldName
             paintFarm(true)
+            task.spawn(function()
+                while farmEnabled and farmToken==owned and available(epoch)
+                    and state.Options.AutoClick and screen.Parent do
+                    if not clickEnabled and type(CombatSignals.RBCClick)=="function" then
+                        local ok,err=pcall(CombatSignals.RBCClick)
+                        if not ok then
+                            warn("[FieldLab RBC Auto Click]",err)
+                            break
+                        end
+                    end
+                    task.wait(0.13)
+                end
+            end)
             task.spawn(function()
                 local ok,err=pcall(runFarm,owned)
                 if not ok then warn("[FieldLab RBC Farm]",err) end
@@ -5131,11 +5147,17 @@ do
                 end
             end
             if not label then return false end
+            local cogs=cogAmount()
+            local required=drive=="GLITCHED" and 100 or 50
+            if not cogs or cogs<required+options.ReserveCogs then
+                state.LastTask="Drive "..drive..": need "..required.." Cogs + reserve"
+                return false
+            end
             local panel=label.Parent
             for i=1,4 do
                 if not panel then break end
-                local cogs=cogAmount()
-                if cogs and cogs<options.ReserveCogs then return false end
+                local current=cogAmount()
+                if not current or current<required+options.ReserveCogs then return false end
                 for _,item in ipairs(panel:GetDescendants()) do
                     if item:IsA("GuiButton") and NativeInteraction.Visible(item) then
                         local t=item:IsA("TextButton") and item.Text:lower() or ""
@@ -5400,7 +5422,7 @@ do
             if data.Team=="RED" or data.Team=="BLUE" or data.Team=="WHITE" then
                 state.Team=data.Team
             end
-            for _,key in ipairs({"AutoFarm","AutoCombat","AutoUpgrades","AutoDrives"}) do
+            for _,key in ipairs({"AutoFarm","AutoCombat","AutoUpgrades","AutoDrives","AutoClick"}) do
                 if type(data[key])=="boolean" then options[key]=data[key] end
             end
             for _,def in ipairs({
@@ -7801,6 +7823,7 @@ local function virtualClick()
     task.wait(0.03)
     VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
 end
+CombatSignals.RBCClick = virtualClick
 clickHit.Activated:Connect(function()
     clickEnabled = not clickEnabled
     clickToken += 1
@@ -8047,7 +8070,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.15") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.16") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -8108,7 +8131,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.15",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.16",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -8600,7 +8623,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.15" then
+    if runtime and runtime.Version == "8.6.16" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
