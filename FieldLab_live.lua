@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.17
+-- FIELDLAB_BUILD: 8.6.18
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.17", Ready = false}
+    local runtime = {Version = "8.6.18", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.17 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.18 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -2277,7 +2277,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.17: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.18: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2456,7 +2456,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.17: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.18: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4350,7 +4350,7 @@ do
 end
 
 
--- v8.6.17: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- v8.6.18: RBC is an independent UI-driven Robo Bear Challenge controller.
 -- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
 -- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
 do
@@ -4371,6 +4371,8 @@ do
             LastUpgradeName="", UpgradesInRound={}, DriveBuys=0,
             HuntNext=0, HuntRunning=false, LastHud=0, LastTaskLog=0,
             LastRoundMenu=0,
+            DialogueClicks=0, DialogueText="", DialogueChangedAt=0,
+            DialogueStage="NONE", LastDialogueAt=0, LastProbe=0,
         }
         local soft = Color3.fromRGB(164,183,204)
         local raised = Color3.fromRGB(32,44,63)
@@ -4519,8 +4521,9 @@ do
             end
             passLabel.Text="Robo Pass: "..state.PassStatus
             lastDecision.Text=string.format(
-                "Round: %d | Cogs reserve: %d | Upgrades bought: %d\n%s",
+                "Round: %d | Cogs reserve: %d | Upgrades bought: %d\nNPC: %s | %s",
                 state.Round,options.ReserveCogs,state.BoughtUpgrades,
+                state.DialogueStage or "NONE",
                 state.LastTask~="" and state.LastTask or "Monitoring NPC / native GUI")
             status.Text=state.Status
             detail.Text=string.format(
@@ -4534,44 +4537,51 @@ do
             state.Status=message
             refresh()
         end
+        -- Read player inventory from both mounting locations. An absent
+        -- Robo Pass row is UNKNOWN, not 0. Atlas-style automation must not
+        -- infer "no tickets" from unrelated EggRows.
         local function readPass()
-            -- Match real Inventory UI: Menus > Children > Eggs > Content >
-            -- EggRow > TypeName/Count. Hidden rows are still readable.
-            local foundAny=false
+            local roots={playerGui}
+            local okCore,core=pcall(function() return game:GetService("CoreGui") end)
+            if okCore and core then table.insert(roots,core) end
             local count=nil
-            for _,obj in ipairs(playerGui:GetDescendants()) do
-                if obj.Name=="EggRow" then
-                    foundAny=true
-                    local typeName=obj:FindFirstChild("TypeName",true)
-                    if typeName and typeName:IsA("TextLabel") then
-                        local normalized=typeName.Text:lower():gsub("[^%a]","")
-                        if normalized=="robopass" then
-                            local value=obj:FindFirstChild("Count",true)
-                            local raw=value and value:IsA("TextLabel") and value.Text or ""
-                            count=tonumber(raw:gsub(",",""):match("%d+")) or 0
-                            break
-                        end
+            local observedRow=false
+            local function normalize(s)
+                return tostring(s or ""):lower():gsub("[^%a]","")
+            end
+            local function labelOf(parent,name)
+                local obj=parent and parent:FindFirstChild(name,true)
+                if obj and (obj:IsA("TextLabel") or obj:IsA("TextButton")
+                    or obj:IsA("TextBox")) then return obj.Text end
+                return ""
+            end
+            for _,root in ipairs(roots) do
+                for _,obj in ipairs(root:GetDescendants()) do
+                    if obj.Name=="EggRow" and normalize(labelOf(obj,"TypeName"))=="robopass" then
+                        observedRow=true
+                        local raw=labelOf(obj,"Count"):gsub(",","")
+                        local num=tonumber(raw:match("^%s*[xX]?%s*(%d+)"))
+                            or tonumber(raw:match("(%d+)"))
+                        if num~=nil then count=num;break end
                     end
                 end
+                if count~=nil then break end
             end
-            -- Fallback: the Main inventory cards were already populated and
-            -- may be fresher than a hidden Eggs panel.
             if count==nil then
                 for _,obj in ipairs(pages.Main:GetDescendants()) do
-                    if obj.Name=="ItemName" and obj:IsA("TextLabel")
-                        and obj.Text:lower():gsub("[^%a]","")=="robopass" then
-                        local parent=obj.Parent
-                        local label=parent and parent:FindFirstChild("ItemCount")
-                        if label and label:IsA("TextLabel") then
-                            count=tonumber(label.Text:gsub(",",""):match("%d+")) or 0
-                            break
-                        end
+                    if obj.Name=="ItemName"
+                        and (obj:IsA("TextLabel") or obj:IsA("TextButton"))
+                        and normalize(obj.Text)=="robopass" then
+                        observedRow=true
+                        local amount=labelOf(obj.Parent,"ItemCount")
+                        local num=tonumber((amount:gsub(",","")):match("(%d+)"))
+                        if num~=nil then count=num;break end
                     end
                 end
             end
-            if count==nil and foundAny then count=0 end
             state.CachedPass=count
-            state.PassStatus=count==nil and "unknown (open Inventory > Eggs)"
+            state.PassStatus=count==nil
+                and (observedRow and "row found; count loading" or "unknown: inventory not loaded")
                 or tostring(count).." available"
             state.LastPassCheck=os.clock()
             state.NoPass=count==0 and (state.RoundStartedAt==0
@@ -5182,32 +5192,97 @@ do
             return false
         end
 
-        -- NPC is a ScreenGui according to Dex; it is not a GuiObject.
-        -- Never reject the root UI solely on its Roblox class.
-        local function dialogueStep(epoch)
-            local native=playerGui:FindFirstChild("NPC",true)
-            if not native then return false end
-            if native:IsA("ScreenGui") then
-                if not native.Enabled then return false end
-            elseif native:IsA("GuiObject") then
-                if not NativeInteraction.Visible(native) then return false end
+        -- Robo Bear NPC has a ScreenGui root (per Dex screenshots).
+        -- Treat the dialogue as a finite-state, observable UI workflow.
+        local function npcRoot()
+            local gui=playerGui:FindFirstChild("NPC",true)
+            if not gui then return nil end
+            if gui:IsA("ScreenGui") then
+                if not gui.Enabled then return nil end
+            elseif gui:IsA("GuiObject") then
+                if not NativeInteraction.Visible(gui) then return nil end
             else
-                return false
+                return nil
+            end
+            return gui
+        end
+        local function dialogueVisible()
+            local gui=npcRoot()
+            if not gui then return false end
+            for _,name in ipairs({"TextBox","OptionFrame","YesButton","NoButton"}) do
+                local item=gui:FindFirstChild(name,true)
+                if item and item:IsA("GuiObject") and NativeInteraction.Visible(item) then
+                    return true
+                end
+            end
+            return false
+        end
+        local function dialogueBoxText(box)
+            local raw=""
+            if box and (box:IsA("TextLabel") or box:IsA("TextButton")
+                or box:IsA("TextBox")) then
+                raw=box.Text or ""
+            end
+            if box and raw=="" then
+                for _,desc in ipairs(box:GetDescendants()) do
+                    if desc:IsA("TextLabel") then raw=raw.." "..desc.Text end
+                end
+            end
+            return raw:gsub("^%s+",""):gsub("%s+$","")
+        end
+        -- Click the exact lower-right "Click to continue" area when the
+        -- fullscreen ButtonOverlay click is swallowed by another GUI.
+        local function clickDialoguePoint(box)
+            if not box or not NativeInteraction.Visible(box) then return false end
+            local point=box.AbsolutePosition+
+                Vector2.new(box.AbsoluteSize.X*0.87,box.AbsoluteSize.Y*0.90)
+            local screenGui=box:FindFirstAncestorOfClass("ScreenGui")
+            if screenGui and screenGui.ScreenInsets==Enum.ScreenInsets.CoreUISafeInsets then
+                point+=GuiService:GetGuiInset()
+            end
+            local x,y=math.floor(point.X),math.floor(point.Y)
+            local oldVisible=window.Visible
+            if oldVisible then window.Visible=false end
+            task.wait(0.025)
+            local ok,err=pcall(function()
+                VIM:SendMouseMoveEvent(x,y,game)
+                task.wait(0.035)
+                VIM:SendMouseButtonEvent(x,y,0,true,game,0)
+                task.wait(0.055)
+                VIM:SendMouseButtonEvent(x,y,0,false,game,0)
+            end)
+            if oldVisible and window.Parent then window.Visible=true end
+            if not ok then warn("[FieldLab RBC Dialogue Click]",err) end
+            return ok
+        end
+        local function dialogueStep(epoch)
+            local native=npcRoot()
+            if not native or not dialogueVisible() then return false end
+            local now=os.clock()
+            CombatSignals.RBCBusy=true
+            local box=native:FindFirstChild("TextBox",true)
+            local newText=dialogueBoxText(box)
+            if newText~=state.DialogueText then
+                state.DialogueText=newText
+                state.DialogueChangedAt=now
+                state.DialogueClicks=0
             end
 
-            -- YesButton must run BEFORE the pass-pending wait branch.
+            -- Follow the actual visible GUI, not stale Pass inventory state.
             local yes=button(native,"YesButton")
             if state.StartIssuedAt>0 and yes and NativeInteraction.Visible(yes) then
-                setStatus("RBC: confirming start using 1 Robo Pass")
+                state.DialogueStage="CONFIRM PASS"
+                setStatus("RBC: confirm Robo Pass (Yes)")
                 if click(yes,epoch) then
-                    state.NextInput=os.clock()+1.0
-                    state.LastTask="Confirmed Robo Pass dialogue"
+                    state.NextInput=now+1
+                    state.LastDialogueAt=now
                 end
                 return true
             end
 
             local optionFrame=native:FindFirstChild("OptionFrame",true)
             if optionFrame and NativeInteraction.Visible(optionFrame) then
+                state.DialogueStage="CHOOSE PASS OPTION"
                 local opt=button(optionFrame,"Option1")
                 local raw=labelText(optionFrame,"Option1")
                 if opt then
@@ -5220,35 +5295,56 @@ do
                 end
                 if opt and NativeInteraction.Visible(opt)
                     and raw:lower():find("robo pass",1,true) then
+                    -- Require exact affirmative option, never spend repeatedly.
                     if state.StartIssuedAt>0 then
                         setStatus("RBC: Pass selected; awaiting confirmation")
                         return true
                     end
-                    setStatus("RBC: choosing Spend 1 Robo Pass")
+                    if state.CachedPass==0 then
+                        state.DialogueStage="WAITING PASS"
+                        setStatus("RBC: 0 Robo Pass. Waiting; option remains open.")
+                        return true
+                    end
+                    setStatus("RBC: selecting Spend 1 Robo Pass")
                     if click(opt,epoch) then
-                        state.StartIssuedAt=os.clock()
-                        state.NextInput=os.clock()+0.9
-                        state.LastTask="Selected Spend 1 Robo Pass"
+                        state.StartIssuedAt=now
+                        state.NextInput=now+1
+                        state.LastDialogueAt=now
                     end
                     return true
                 end
-                setStatus("RBC: waiting for Robo Pass option / Option1 text")
+                setStatus("RBC: OptionFrame open; waiting for a verified Pass option")
                 return true
             end
 
-            -- Welcome User, Robo Bear introduction, Click to continue.
-            -- Try the game's clickable overlay first, otherwise TextBox.
-            local box=native:FindFirstChild("TextBox",true)
+            -- The greeting shows a TextBox and ButtonOverlay but no options.
+            -- Rotate methods if it fails, without reopening NPC or spending.
             if box and NativeInteraction.Visible(box) then
+                state.DialogueStage="CONTINUE"
                 local overlay=native:FindFirstChild("ButtonOverlay",true)
-                local target=overlay and overlay:IsA("GuiButton")
-                    and NativeInteraction.Visible(overlay) and overlay or box
-                if click(target,epoch) then
-                    state.NextInput=os.clock()+0.65
-                    state.LastTask="Advancing Robo Bear dialogue"
-                    setStatus("RBC: advancing dialogue (click to continue)")
+                local method=state.DialogueClicks%3
+                local success=false
+                if method==0 then
+                    success=clickDialoguePoint(box)
+                elseif method==1 then
+                    success=click(box,epoch)
                 else
-                    setStatus("RBC: dialogue visible, click failed")
+                    local target=overlay and overlay:IsA("GuiButton")
+                        and NativeInteraction.Visible(overlay) and overlay
+                    success=target and click(target,epoch) or clickDialoguePoint(box)
+                end
+                state.DialogueClicks+=1
+                state.LastDialogueAt=now
+                state.NextInput=now+0.8
+                state.LastTask=string.format(
+                    "NPC dialogue: %s | click #%d (%s)",
+                    newText~="" and newText:sub(1,56) or "(text loading)",
+                    state.DialogueClicks,
+                    method==0 and "prompt" or (method==1 and "textbox" or "overlay"))
+                setStatus(success and ("RBC: continue dialogue ("..state.DialogueClicks..")")
+                    or "RBC: dialogue click failed; retrying")
+                if now-state.DialogueChangedAt>12 and state.DialogueClicks>=8 then
+                    setStatus("RBC: dialogue text unchanged after 8 clicks; inspect input permissions")
                 end
                 return true
             end
@@ -5319,6 +5415,7 @@ do
                     handleRound(epoch)
                     -- All other auto movement is suspended during RBC.
                 elseif scene then
+                    state.DialogueStage="CHALLENGE SCREEN"
                     endOwnedFarm()
                     state.HuntRunning=false
                     CombatSignals.RBCBusy=true
@@ -5356,7 +5453,12 @@ do
                     if not activeRound and now-state.LastHud>4 then
                         tryDriveFromOpenShop(epoch)
                     end
-                    if state.RoundStartedAt>0 and now-state.RoundStartedAt<310 then
+                    -- NPC dialogue is higher-priority than passive inventory
+                    -- reading. Otherwise a visible Welcome User can be ignored
+                    -- forever whenever an EggRow is missing or stale.
+                    if now>=state.NextInput and dialogueVisible() then
+                        dialogueStep(epoch)
+                    elseif state.RoundStartedAt>0 and now-state.RoundStartedAt<310 then
                         -- After Start Round we must never spend another Pass
                         -- while the current five-minute challenge is running.
                         if now-state.RoundStartedAt<4 then
@@ -5388,8 +5490,6 @@ do
                                 CombatSignals.EnsureInventoryRows()
                             end)
                         end
-                    elseif now>=state.NextInput and dialogueStep(epoch) then
-                        -- NPC may still require Yes confirmation after Pass choice.
                     elseif state.StartIssuedAt>0 then
                         -- Never spend a second Robo Pass if the server is slow.
                         setStatus("RBC: awaiting Challenge UI after Pass confirmation")
@@ -5416,6 +5516,11 @@ do
             state.RoundStartedAt=0
             state.StartIssuedAt=0
             state.RoundText=""
+            state.DialogueClicks=0
+            state.DialogueText=""
+            state.DialogueChangedAt=os.clock()
+            state.DialogueStage="NONE"
+            state.NextInput=0
             state.NextVisit=0
             CombatSignals.RBCBusy=false
             if not state.Enabled then
@@ -8092,7 +8197,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.17") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.18") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -8153,7 +8258,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.17",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.18",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -8645,7 +8750,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.17" then
+    if runtime and runtime.Version == "8.6.18" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
