@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.6
+-- FIELDLAB_BUILD: 8.6.7
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.6", Ready = false}
+    local runtime = {Version = "8.6.7", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.6 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.7 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -4223,7 +4223,7 @@ end
 do
     local function initializeBlender()
         local page = pages.Toy
-        local state = {Busy=false, Epoch=0, Recipes={}, Selected=nil, Quantity=1}
+        local state = {Busy=false, Epoch=0, Recipes={}, Selected=nil, Quantity=1, PendingScan=false}
         local bg = Color3.fromRGB(19, 22, 30)
         local border = Color3.fromRGB(150, 89, 255)
         local hint = Color3.fromRGB(172, 181, 198)
@@ -4306,12 +4306,37 @@ do
             if obj and (obj:IsA("ImageButton") or obj:IsA("TextButton")) then return obj end
             return nil
         end
+        -- RecipeProgress stays visible even AFTER crafting has finished.
+        -- Red EndButton means cancel an active craft; green EndButton means
+        -- collect the finished batch. Never infer completion from the word
+        -- 'Crafting' in ActionLabel: that text persists after completion.
+        local function blenderPhase(box)
+            local progress=box and box:FindFirstChild("RecipeProgress",true)
+            if not progress or not progress:IsA("GuiObject")
+                or not NativeInteraction.Visible(progress) then
+                return "idle", ""
+            end
+            local timer=textOf(progress,"TimeLabel")
+            local mm,ss=timer:match("(%d+)%s*:%s*(%d+)")
+            local timeLeft=mm and (tonumber(mm)*60+tonumber(ss)) or nil
+            local finish=findButton(progress,"EndButton")
+            if finish and NativeInteraction.Visible(finish) then
+                local color=finish.BackgroundColor3
+                local green=color.G>0.32 and color.G>color.R*1.3
+                    and color.G>color.B*1.12
+                local bar=progress:FindFirstChild("ProgressBar",true)
+                local fill=bar and bar:FindFirstChild("FillBar",true)
+                local full=bar and fill and bar:IsA("GuiObject")
+                    and fill:IsA("GuiObject") and bar.AbsoluteSize.X>3
+                    and fill.AbsoluteSize.X / bar.AbsoluteSize.X >= 0.985
+                if green or (full and (timeLeft==nil or timeLeft<=0)) then
+                    return "ready",timer
+                end
+            end
+            return "running",timer
+        end
         local function craftingNow(box)
-            local progress=box and box:FindFirstChild("RecipeProgress")
-            if not progress or not progress.Visible then return false end
-            local action=textOf(progress,"ActionLabel"):lower()
-            local time=textOf(progress,"TimeLabel")
-            return action:find("craft",1,true) ~= nil or time:match("%d+:%d+") ~= nil
+            return blenderPhase(box) ~= "idle"
         end
         local function moveToBlender(id)
             local box=findBox()
@@ -4378,7 +4403,67 @@ do
         local function scanRecipes(id)
             local box=moveToBlender(id)
             if not box then return end
-            if craftingNow(box) then tell("Blender is crafting; wait for it to finish");return end
+            local phase,timer=blenderPhase(box)
+            if phase=="running" then
+                -- Leave an active batch completely untouched. The background
+                -- watcher will resume SCAN only after it becomes claimable.
+                state.PendingScan=true
+                tell("Crafting "..(timer~="" and timer or "in progress")
+                    .." | Will collect and SCAN when finished")
+                return
+            end
+            if phase=="ready" then
+                -- The actual completed-batch action is RecipeProgress.EndButton.
+                -- Clicking it while red would cancel crafting, so only click
+                -- after blenderPhase says READY (green/full progress).
+                tell("Craft complete! Collecting finished batch...")
+                for attempt=1,2 do
+                    if not available(id) then return end
+                    local progress=box:FindFirstChild("RecipeProgress",true)
+                    local finish=findButton(progress,"EndButton")
+                    if not finish or not NativeInteraction.Visible(finish) then
+                        tell("Completed craft has no visible EndButton")
+                        return
+                    end
+                    if blenderPhase(box)~="ready" then break end
+                    if not click(finish,id) then
+                        tell("Unable to click green End Crafting button")
+                        return
+                    end
+                    local deadline=os.clock()+3.0
+                    local recipeReady=false
+                    while available(id) and os.clock()<deadline do
+                        local latest=findBox()
+                        if latest then box=latest end
+                        local recipe=box and box:FindFirstChild("RecipeInfo",true)
+                        if blenderPhase(box)=="idle"
+                            and recipe and NativeInteraction.Visible(recipe) then
+                            recipeReady=true
+                            break
+                        end
+                        task.wait(.13)
+                    end
+                    if not recipeReady and blenderPhase(box)=="idle" then
+                        -- Claiming can close the native Blender popup entirely.
+                        -- Re-open it before reading recipe names and turning pages.
+                        local reopened=moveToBlender(id)
+                        local recipe=reopened and reopened:FindFirstChild("RecipeInfo",true)
+                        if reopened and recipe and NativeInteraction.Visible(recipe) then
+                            box=reopened
+                            recipeReady=true
+                        end
+                    end
+                    if recipeReady then break end
+                end
+                local recipe=box and box:FindFirstChild("RecipeInfo",true)
+                if blenderPhase(box)~="idle"
+                    or not recipe or not NativeInteraction.Visible(recipe) then
+                    tell("End Crafting clicked but recipe menu did not reopen")
+                    return
+                end
+                tell("Rewards collected; scanning recipes...")
+            end
+            state.PendingScan=false
             local forward=findButton(box,"ForwardButton")
             local recipe=box:FindFirstChild("RecipeInfo",true)
             if not recipe or not forward then tell("RecipeInfo/ForwardButton missing");return end
@@ -4406,7 +4491,14 @@ do
             state.Quantity=qty
             local box=moveToBlender(id)
             if not box then return end
-            if craftingNow(box) then tell("Blender is already crafting");return end
+            local phase,timer=blenderPhase(box)
+            if phase=="running" then
+                tell("Blender is crafting ("..timer.."); SCAN will wait for completion")
+                return
+            elseif phase=="ready" then
+                tell("Finished batch is unclaimed. Press SCAN to collect first")
+                return
+            end
             tell("Selecting "..requested)
             if not cycleUntil(box,requested,id) then
                 tell("Recipe not found in Blender GUI");return end
@@ -4515,8 +4607,33 @@ do
         end)
 
         scan.Activated:Connect(function() start(scanRecipes) end)
-        craft.Activated:Connect(function() start(craftItem) end)
+        craft.Activated:Connect(function()
+            state.PendingScan=false
+            start(craftItem)
+        end)
+        -- A SCAN pressed during crafting registers a passive intent. Poll the
+        -- visible GUI instead of holding ToyBusy for the entire crafting timer.
+        -- Never pull the player away from Farm/Combat/Planter work.
+        task.spawn(function()
+            while screen.Parent do
+                task.wait(1.5)
+                if state.PendingScan and not state.Busy and not farmEnabled
+                    and not CombatController.IsBusy()
+                    and not CombatSignals.PlanterBusy
+                    and not CombatSignals.AntBusy then
+                    local box=findBox()
+                    if box and NativeInteraction.Visible(box) then
+                        local phase=blenderPhase(box)
+                        if phase=="ready" or phase=="idle" then
+                            state.PendingScan=false
+                            start(scanRecipes)
+                        end
+                    end
+                end
+            end
+        end)
         CombatSignals.ToyCancel=function()
+            state.PendingScan=false
             state.Epoch+=1
             state.Busy=false
             CombatSignals.ToyBusy=false
@@ -6493,7 +6610,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.6") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.7") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6554,7 +6671,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.6",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.7",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7035,7 +7152,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.6" then
+    if runtime and runtime.Version == "8.6.7" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
