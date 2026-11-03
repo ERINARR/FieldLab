@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.5
+-- FIELDLAB_BUILD: 8.6.6
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.5", Ready = false}
+    local runtime = {Version = "8.6.6", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.5 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.6 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -5550,9 +5550,24 @@ do
         -- the type comes from GuiAttach > PlanterGui > Bar > TextLabel.
         local function attachedGui(model)
             if not model then return nil end
-            local attach = model:FindFirstChild("GuiAttach", true)
-            local gui = attach and attach:FindFirstChild("PlanterGui", true)
-            return gui
+            -- Dex shows actual names "Gui Attach" > "Planter Gui" in some
+            -- servers; older builds used "GuiAttach" > "PlanterGui".
+            -- Normalize whitespace/punctuation rather than exact FindFirstChild.
+            local descendants = model:GetDescendants()
+            for _, obj in ipairs(descendants) do
+                if norm(obj.Name) == "guiattach" then
+                    for _, child in ipairs(obj:GetDescendants()) do
+                        if norm(child.Name) == "plantergui" then
+                            return child
+                        end
+                    end
+                end
+            end
+            -- Some game builds parent the BillboardGui directly to the bulb.
+            for _, obj in ipairs(descendants) do
+                if norm(obj.Name) == "plantergui" then return obj end
+            end
+            return nil
         end
         local function planterText(model)
             local gui = attachedGui(model)
@@ -5590,11 +5605,10 @@ do
             local folder = workspace:FindFirstChild("Planters")
             local result = {}
             if not folder then return result end
-            -- Resolve each individual bulb, not an arbitrary outer container.
-            -- This prevents duplicate counting and maps GrowthPercent to the
-            -- exact PlanterGui whose name/owner indicator was observed.
+            -- Named templates also live under Planters. Only actual bulbs with
+            -- a GrowthPercent ValueBase represent deployed instances.
             for _, model in ipairs(folder:GetDescendants()) do
-                if model.Name == "PlanterBulb"
+                if norm(model.Name) == "planterbulb"
                     and (model:IsA("Model") or model:IsA("BasePart")) then
                     local value = model:FindFirstChild("GrowthPercent", true)
                     if value and value:IsA("ValueBase") then
@@ -5602,11 +5616,11 @@ do
                     end
                 end
             end
-            -- Older game layouts may put GrowthPercent directly in a typed
-            -- model without using a child called PlanterBulb.
+            -- Older game layouts may put GrowthPercent inside a typed model.
             if #result == 0 then
                 for _, model in ipairs(folder:GetChildren()) do
-                    if model:FindFirstChild("GrowthPercent", true) then
+                    local value = model:FindFirstChild("GrowthPercent", true)
+                    if value and value:IsA("ValueBase") then
                         table.insert(result, model)
                     end
                 end
@@ -5689,7 +5703,8 @@ do
         end
         local function renderLive()
             local mineNow = {}
-            for _, model in ipairs(activeModels()) do
+            local detectedBulbs = activeModels()
+            for _, model in ipairs(detectedBulbs) do
                 if mine(model) then table.insert(mineNow, model) end
             end
             table.sort(mineNow, function(a, b)
@@ -5728,7 +5743,9 @@ do
                 end
             end
             if count == 0 then
-                liveSummary.Text = "MY PLANTERS: 0/3   |   No owned PlanterGui detected"
+                liveSummary.Text = string.format(
+                    "MY PLANTERS: 0/3   |   Found %d bulbs; no personal GUI",
+                    #detectedBulbs)
             end
         end
         local function selectedIndex(typ)
@@ -5761,7 +5778,14 @@ do
                 b.BackgroundColor3 = typ == state.PendingType and palette.green or palette.surface
             end
             if #types == 0 then
-                setStatus("Chưa đọc được Planter. Mở Inventory > Eggs một lần rồi quay lại Plant.")
+                local bulbs = activeModels()
+                if #bulbs > 0 then
+                    setStatus(string.format(
+                        "Thấy %d PlanterBulb nhưng chưa nhận diện được GUI sở hữu.",
+                        #bulbs))
+                else
+                    setStatus("Chưa đọc được Planter. Mở Inventory > Eggs một lần rồi quay lại Plant.")
+                end
             end
         end
         local function renderFields()
@@ -6469,7 +6493,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.5") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.6") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6530,7 +6554,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.5",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.6",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7011,7 +7035,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.5" then
+    if runtime and runtime.Version == "8.6.6" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
