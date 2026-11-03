@@ -3304,8 +3304,9 @@ do
             PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 10),
         }, scroll)
         local status = makeLabel(page, "Scanning MonsterSpawners...",
-            UDim2.new(1, -24, 0, 40), UDim2.fromOffset(12, 325), 12)
+            UDim2.new(1, -24, 0, 50), UDim2.fromOffset(12, 325), 10)
         status.TextColor3 = gray
+        status.TextYAlignment = Enum.TextYAlignment.Top
         local function getSpawners()
             if not spawnerFolder or not spawnerFolder.Parent then
                 spawnerFolder = workspace:FindFirstChild("MonsterSpawners")
