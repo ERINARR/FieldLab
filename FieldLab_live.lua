@@ -4685,7 +4685,8 @@ do
         local function approach(epoch)
             if not available(epoch) or CombatController.IsBusy()
                 or CombatSignals.AntBusy or CombatSignals.PlanterBusy
-                or CombatSignals.ToyBusy or CombatSignals.LootBusy then
+                or CombatSignals.ToyBusy or CombatSignals.LootBusy
+                or (CombatSignals.QuestIsBusy and CombatSignals.QuestIsBusy()) then
                 setStatus("RBC: waiting for other task to finish")
                 return
             end
