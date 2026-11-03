@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.11
+-- FIELDLAB_BUILD: 8.6.12
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.11", Ready = false}
+    local runtime = {Version = "8.6.12", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.11 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.12 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -51,7 +51,7 @@ local currentHiveTween = nil
 local currentFarmTravelTween = nil
 local hiveBusy = true
 -- Combat is defined after the Farm UI. These callbacks give manual controls priority.
-local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false, Sprinkler = {Enabled = false, LastField = nil, LastAt = 0, RetryAt = 0, LastCharacter = nil}}
+local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false, RBCBusy = false, Sprinkler = {Enabled = false, LastField = nil, LastAt = 0, RetryAt = 0, LastCharacter = nil}}
 -- Combat-owned Stump Farm uses this shared avoidance state. Other farms are unaffected.
 CombatSignals.AvoidMob = nil
 
@@ -387,7 +387,7 @@ end)
 local pages = {}
 local tabButtons = {}
 local selectedTab = "Farm"
-local tabNames = {"Main", "Farm", "Combat", "Toy", "Quest", "Upgrade", "Hive", "Plant", "Config"}
+local tabNames = {"Main", "Farm", "Combat", "RBC", "Toy", "Quest", "Upgrade", "Hive", "Plant", "Config"}
 
 for i, name in ipairs(tabNames) do
     local b = ui("TextButton", {
@@ -2273,7 +2273,7 @@ do
         LootTools.Each(function(part) seen[part] = true end)
         return seen
     end
-    -- FieldLab v8.6.11: watch native Alerts > AlertBox text during a fight.
+    -- FieldLab v8.6.12: watch native Alerts > AlertBox text during a fight.
     -- These messages appear AFTER the server grants a reward. They identify
     -- reward sources ("from Ladybug"), not necessarily which 3D token spawned
     -- that reward before collection. Connections are disconnected per fight.
@@ -2452,7 +2452,7 @@ do
         if not ok then warn("[BSS Loot walking]", arrived) end
         return ok and arrived == true
     end
-    -- v8.6.11: the same Farm navigator now drives all post-kill/planter loot.
+    -- v8.6.12: the same Farm navigator now drives all post-kill/planter loot.
     -- New-token attribution, reward alerts, and short quiet-time exits remain.
     function LootTools.CollectNew(options)
         local center = options.Center
@@ -4197,11 +4197,12 @@ do
                     -- owned Stump Farm runs while state.Busy is true.
                     if not state.Busy and not state.QuestPriority and not farmEnabled
                         and not state.ManualFarm and not CombatSignals.PlanterBusy
-                        and not CombatSignals.AntBusy and not CombatSignals.ToyBusy then
+                        and not CombatSignals.AntBusy and not CombatSignals.ToyBusy
+                        and not CombatSignals.RBCBusy then
                         for _, spawner in ipairs(getSpawners()) do
                             if not state.Enabled or state.RunId ~= id or farmEnabled
                                 or CombatSignals.PlanterBusy or CombatSignals.AntBusy
-                                or CombatSignals.ToyBusy then break end
+                                or CombatSignals.ToyBusy or CombatSignals.RBCBusy then break end
                             local available = cooldownState(spawner)
                             if state.Selected[spawner.Name] and available
                                 and not (isStump(spawner) and state.StumpStoppedByUser) then
@@ -4340,6 +4341,468 @@ do
         if not ok then warn("[BSS v8.3 native click]", err) end
         return ok
     end
+end
+
+
+-- v8.6.12: RBC is an independent UI-driven Robo Bear Challenge controller.
+-- It deliberately never guesses server RemoteEvent arguments, buys upgrades,
+-- rerolls with Cogs, or starts a second challenge without an observed Robo Pass.
+do
+    local function initializeRBC()
+        local page = pages.RBC
+        local state = {
+            Enabled=false, Team="RED", Epoch=0, Status="OFF", Busy=false,
+            NextVisit=0, NextInput=0, StartIssuedAt=0, RoundStartedAt=0,
+            LastQuest="None", Picked={}, LastRound=0, PassStatus="Unknown",
+            NoPass=false, LastPassCheck=0, CachedPass=nil,
+        }
+        local soft = Color3.fromRGB(164,183,204)
+        local raised = Color3.fromRGB(32,44,63)
+        local onColor = Color3.fromRGB(43,103,75)
+        local function text(parent, value, x, y, w, h, sz)
+            return ui("TextLabel", {
+                Position=UDim2.fromOffset(x,y),
+                Size=UDim2.new(1,w-590,0,h),
+                BackgroundTransparency=1,
+                Text=value, TextColor3=soft,
+                Font=Enum.Font.Gotham,
+                TextSize=sz or 13, TextWrapped=true,
+                TextXAlignment=Enum.TextXAlignment.Left,
+                TextYAlignment=Enum.TextYAlignment.Top,
+                ZIndex=5,
+            },parent)
+        end
+        local title = text(page,"ROBO BEAR CHALLENGE",14,10,580,24,16)
+        title.Font=Enum.Font.GothamBold
+        title.TextColor3=Color3.fromRGB(224,232,244)
+        local toggle=ui("TextButton",{
+            Name="RBCAutoToggle",Position=UDim2.fromOffset(14,41),
+            Size=UDim2.fromOffset(200,31),
+            BackgroundColor3=raised,BorderSizePixel=0,
+            Text="AUTO RBC: OFF",Font=Enum.Font.GothamBold,TextSize=13,
+            TextColor3=Color3.fromRGB(240,245,255),ZIndex=6,
+        },page)
+        ui("UICorner",{CornerRadius=UDim.new(0,6)},toggle)
+        local passLabel=text(page,"Robo Pass: checking inventory...",229,43,565,28,13)
+        local teamLabel=text(page,"TEAM PRIORITY",14,83,580,22,12)
+        teamLabel.Font=Enum.Font.GothamBold
+        local colors={RED=Color3.fromRGB(155,56,65),
+            BLUE=Color3.fromRGB(42,94,155),
+            WHITE=Color3.fromRGB(112,120,139)}
+        local teamButtons={}
+        for i,team in ipairs({"RED","BLUE","WHITE"}) do
+            local b=ui("TextButton",{
+                Name="RBCTeam"..team,
+                Position=UDim2.fromOffset(14+(i-1)*151,112),
+                Size=UDim2.fromOffset(140,32),
+                BackgroundColor3=raised,BorderSizePixel=0,
+                Text=team,Font=Enum.Font.GothamBold,TextSize=14,
+                TextColor3=Color3.fromRGB(228,235,248),ZIndex=6,
+            },page)
+            ui("UICorner",{CornerRadius=UDim.new(0,5)},b)
+            teamButtons[team]=b
+        end
+        local help=text(page,
+            "Color priority affects Quest A/B and Bee picks. No auto-reroll or Cog purchase.",
+            14,151,560,31,11)
+        local statusTitle=text(page,"STATUS",14,195,580,19,12)
+        statusTitle.Font=Enum.Font.GothamBold
+        local status=text(page,"RBC disabled",14,219,565,54,13)
+        local detail=text(page,
+            "Waiting for Inventory > Eggs / Robo Pass data. Select a team, then enable.",
+            14,280,565,77,12)
+        local liveHint=text(page,
+            "RBC controls intake and ROUND SETUP only. During the timed round, manual Farm/Combat remains available.",
+            14,360,560,43,11)
+        local function refresh()
+            toggle.Text=state.Enabled and (state.NoPass and "RBC: WAITING PASS" or "AUTO RBC: ON")
+                or "AUTO RBC: OFF"
+            toggle.BackgroundColor3=state.Enabled and onColor or raised
+            for team,b in pairs(teamButtons) do
+                b.BackgroundColor3=state.Team==team and colors[team] or raised
+                b.Text=(state.Team==team and "● " or "")..team
+            end
+            passLabel.Text="Robo Pass: "..state.PassStatus
+            status.Text=state.Status
+            detail.Text=string.format(
+                "Team: %s   |   Last Quest: %s\n%s",
+                state.Team,state.LastQuest,
+                state.NoPass and "Paused. Will restart automatically when inventory reports a Robo Pass."
+                    or "Quest choice -> Bee selection -> Start Round; does not spend Cogs.")
+        end
+        local function setStatus(message)
+            state.Status=message
+            refresh()
+        end
+        local function readPass()
+            -- Match real Inventory UI: Menus > Children > Eggs > Content >
+            -- EggRow > TypeName/Count. Hidden rows are still readable.
+            local foundAny=false
+            local count=nil
+            for _,obj in ipairs(playerGui:GetDescendants()) do
+                if obj.Name=="EggRow" then
+                    foundAny=true
+                    local typeName=obj:FindFirstChild("TypeName",true)
+                    if typeName and typeName:IsA("TextLabel") then
+                        local normalized=typeName.Text:lower():gsub("[^%a]","")
+                        if normalized=="robopass" then
+                            local value=obj:FindFirstChild("Count",true)
+                            local raw=value and value:IsA("TextLabel") and value.Text or ""
+                            count=tonumber(raw:gsub(",",""):match("%d+")) or 0
+                            break
+                        end
+                    end
+                end
+            end
+            -- Fallback: the Main inventory cards were already populated and
+            -- may be fresher than a hidden Eggs panel.
+            if count==nil then
+                for _,obj in ipairs(pages.Main:GetDescendants()) do
+                    if obj.Name=="ItemName" and obj:IsA("TextLabel")
+                        and obj.Text:lower():gsub("[^%a]","")=="robopass" then
+                        local parent=obj.Parent
+                        local label=parent and parent:FindFirstChild("ItemCount")
+                        if label and label:IsA("TextLabel") then
+                            count=tonumber(label.Text:gsub(",",""):match("%d+")) or 0
+                            break
+                        end
+                    end
+                end
+            end
+            if count==nil and foundAny then count=0 end
+            state.CachedPass=count
+            state.PassStatus=count==nil and "unknown (open Inventory > Eggs)"
+                or tostring(count).." available"
+            state.LastPassCheck=os.clock()
+            state.NoPass=count==0
+            refresh()
+            return count
+        end
+        local function available(epoch)
+            return state.Enabled and state.Epoch==epoch and screen.Parent~=nil
+        end
+        local function click(obj,epoch)
+            if not available(epoch) or not obj or not NativeInteraction.Visible(obj) then
+                return false
+            end
+            return NativeInteraction.Click(obj)
+        end
+        local function getBox()
+            local gui=playerGui:FindFirstChild("RoboBearPrompt",true)
+            if not gui then return nil end
+            local main=gui:FindFirstChild("MainFrame",true)
+            local box=main and main:FindFirstChild("Box")
+            return box
+        end
+        local function activeScene()
+            local box=getBox()
+            if not box then return nil,nil end
+            for _,n in ipairs({"QuestSelectScreen","BeeSelectScreen",
+                "UpgradeSelectScreen","EndScreen"}) do
+                local sc=box:FindFirstChild(n)
+                if sc and NativeInteraction.Visible(sc) then
+                    return n,sc
+                end
+            end
+            return nil,nil
+        end
+        local function button(container,name)
+            local obj=container and container:FindFirstChild(name,true)
+            return obj and (obj:IsA("GuiButton")) and obj or nil
+        end
+        local function labelText(container,name)
+            local obj=container and container:FindFirstChild(name,true)
+            return obj and (obj:IsA("TextLabel") or obj:IsA("TextButton"))
+                and obj.Text or ""
+        end
+        local function colorQuestScore(raw)
+            local lower=raw:lower()
+            local patterns={
+                RED={"red pollen","red flowers","mushroom field",
+                    "strawberry field","rose field","pepper patch"},
+                BLUE={"blue pollen","blue flowers","blue flower field",
+                    "bamboo field","pine tree forest","stump field"},
+                WHITE={"white pollen","white flowers","sunflower field",
+                    "dandelion field","spider field","coconut field"},
+            }
+            local score=0
+            for color,phrases in pairs(patterns) do
+                for _,phrase in ipairs(phrases) do
+                    if lower:find(phrase,1,true) then
+                        score += color==state.Team and 95 or -28
+                    end
+                end
+            end
+            local reward=tonumber(lower:match("reward:%s*(%d+)%s*cogs")) or 0
+            return score+math.min(reward,30)*0.5
+        end
+        local beeColor={
+            rad="RED",rascal="RED",fire="RED",rage="RED",
+            riley="RED",demon="RED",shy="RED",precise="RED",
+            spicy="RED",crimson="RED",festive="RED",
+            bumble="BLUE",cool="BLUE",bubble="BLUE",bucko="BLUE",
+            frosty="BLUE",diamond="BLUE",ninja="BLUE",
+            buoyant="BLUE",tadpole="BLUE",cobalt="BLUE",vicious="BLUE",
+        }
+        local function beeScore(raw)
+            local name=raw:lower():match("([%a]+)%s+bee") or ""
+            local color=beeColor[name] or "WHITE"
+            local base=color==state.Team and 100 or 0
+            local lvl=tonumber(raw:lower():match("lvl%s*(%d+)")) or 0
+            local mythics={precise=true,spicy=true,buoyant=true,
+                tadpole=true,fuzzy=true,vector=true}
+            if mythics[name] then base+=10 end
+            if raw:find("★",1,true) then base+=6 end
+            return base+lvl*0.15
+        end
+        local function chooseQuest(scene,epoch)
+            local frame=scene:FindFirstChild("ButtonFrame",true)
+            if not frame then setStatus("RBC: Quest ButtonFrame missing");return end
+            local choices={}
+            for i=1,2 do
+                local b=button(frame,"Button"..i)
+                if b and NativeInteraction.Visible(b) then
+                    local chunks={labelText(b,"TitleLbl"),labelText(b,"RewardLbl")}
+                    for n=1,3 do table.insert(chunks,labelText(b,"TaskLbl"..n)) end
+                    local raw=table.concat(chunks," ")
+                    table.insert(choices,{Button=b,Text=raw,Score=colorQuestScore(raw),Index=i})
+                end
+            end
+            table.sort(choices,function(a,b)return a.Score>b.Score end)
+            local pick=choices[1]
+            if not pick then setStatus("RBC: no Quest A/B buttons");return end
+            state.LastQuest="Quest "..(pick.Index==1 and "A" or "B")
+            state.Picked={}
+            setStatus(string.format("RBC: selecting %s for %s (score %.1f)",
+                state.LastQuest,state.Team,pick.Score))
+            if click(pick.Button,epoch) then state.NextInput=os.clock()+0.75 end
+        end
+        local function chooseBee(scene,epoch)
+            local frame=scene:FindFirstChild("ButtonFrame",true)
+            if not frame then setStatus("RBC: Bee ButtonFrame missing");return end
+            local choices={}
+            for i=1,4 do
+                local b=button(frame,"Button"..i)
+                if b and NativeInteraction.Visible(b) then
+                    local title=labelText(b,"Text1")
+                    local desc=labelText(b,"Text2")
+                    if title~="" and not state.Picked[title] then
+                        table.insert(choices,{
+                            Button=b,Title=title,Score=beeScore(title.." "..desc)
+                        })
+                    end
+                end
+            end
+            table.sort(choices,function(a,b)return a.Score>b.Score end)
+            local pick=choices[1]
+            if not pick then
+                setStatus("RBC: waiting for bee options / already selected visible bees")
+                return
+            end
+            setStatus("RBC: selecting "..pick.Title.." ["..state.Team.."]")
+            if click(pick.Button,epoch) then
+                state.Picked[pick.Title]=true
+                state.NextInput=os.clock()+0.65
+            end
+        end
+        local function startRound(epoch)
+            local box=getBox()
+            local start=button(box,"StartRoundButton")
+            if not start or not NativeInteraction.Visible(start) then
+                setStatus("RBC: waiting for green START ROUND")
+                return
+            end
+            if click(start,epoch) then
+                state.RoundStartedAt=os.clock()
+                state.NextInput=os.clock()+2
+                state.LastRound+=1
+                setStatus("RBC: START ROUND pressed. Timed round in progress.")
+            end
+        end
+        local function dialogueStep(epoch)
+            local native=playerGui:FindFirstChild("NPC",true)
+            if not native or not native:IsA("GuiObject")
+                or not NativeInteraction.Visible(native) then return false end
+            local optionFrame=native:FindFirstChild("OptionFrame")
+            if optionFrame and NativeInteraction.Visible(optionFrame) then
+                local opt=button(optionFrame,"Option1")
+                local raw=labelText(optionFrame,"Option1")
+                -- The option itself may have Text or a nested TextLabel.
+                if opt then
+                    raw=(raw.." "..(opt:IsA("TextButton") and opt.Text or ""))
+                    for _,child in ipairs(opt:GetDescendants()) do
+                        if child:IsA("TextLabel") then raw=raw.." "..child.Text end
+                    end
+                end
+                if opt and raw:lower():find("robo pass",1,true) then
+                    if os.clock()-state.StartIssuedAt<25 then return true end
+                    setStatus("RBC: spending 1 Robo Pass (confirmed by NPC option)")
+                    if click(opt,epoch) then
+                        state.StartIssuedAt=os.clock()
+                        state.NextInput=os.clock()+0.8
+                    end
+                    return true
+                end
+                setStatus("RBC: Robo Pass option not available in NPC dialogue")
+                return true
+            end
+            local yes=button(native,"YesButton")
+            if yes and NativeInteraction.Visible(yes)
+                and os.clock()-state.StartIssuedAt<25 then
+                setStatus("RBC: confirming Robo Pass start")
+                if click(yes,epoch) then state.NextInput=os.clock()+1 end
+                return true
+            end
+            local box=native:FindFirstChild("TextBox")
+            if box and NativeInteraction.Visible(box) then
+                if click(box,epoch) then
+                    state.NextInput=os.clock()+0.45
+                    setStatus("RBC: advancing Robo Bear dialogue")
+                end
+                return true
+            end
+            return false
+        end
+        local function approach(epoch)
+            if not available(epoch) or CombatController.IsBusy()
+                or CombatSignals.AntBusy or CombatSignals.PlanterBusy
+                or CombatSignals.ToyBusy or CombatSignals.LootBusy then
+                setStatus("RBC: waiting for other task to finish")
+                return
+            end
+            -- RBC has priority over Farm when the user turns it on.
+            if farmEnabled then
+                farmEnabled=false
+                farmToken+=1
+                if currentFarmTravelTween then
+                    currentFarmTravelTween:Cancel()
+                    currentFarmTravelTween=nil
+                end
+                stopWalking()
+                paintFarm(false)
+            end
+            local npcs=workspace:FindFirstChild("NPCs")
+            local bear=npcs and npcs:FindFirstChild("Robo Bear")
+            local circle=bear and bear:FindFirstChild("Circle",true)
+            if not circle or not circle:IsA("BasePart") then
+                setStatus("RBC: Workspace.NPCs.Robo Bear.Circle not found")
+                state.NextVisit=os.clock()+9
+                return
+            end
+            local hum,root=getHumanoidAndRoot()
+            if not root or hum.Health<=0 then return end
+            CombatSignals.RBCBusy=true
+            state.Busy=true
+            setStatus("RBC: flying to Robo Bear")
+            local point=circle.Position+Vector3.new(0,math.max(2.5,circle.Size.Y/2+1.5),0)
+            local route={}
+            if (root.Position-point).Magnitude>22 then
+                local y=math.max(root.Position.Y,point.Y)+18
+                table.insert(route,Vector3.new(root.Position.X,y,root.Position.Z))
+                table.insert(route,Vector3.new(point.X,y,point.Z))
+            end
+            table.insert(route,point)
+            local reached=SmoothFlight.Path(root,route,function()
+                return available(epoch) and not farmEnabled
+            end,TweenSpeed)
+            if reached and available(epoch) then
+                setStatus("RBC: interacting with Robo Bear")
+                NativeInteraction.PressE()
+                task.wait(0.35)
+            elseif available(epoch) then
+                setStatus("RBC: could not reach the NPC, retry later")
+            end
+            state.NextVisit=os.clock()+9
+            state.Busy=false
+            CombatSignals.RBCBusy=false
+        end
+        local function cycle(epoch)
+            while available(epoch) do
+                local now=os.clock()
+                local scene,frame=activeScene()
+                if scene then
+                    CombatSignals.RBCBusy=true
+                    if not state.Busy and now>=state.NextInput then
+                        if scene=="QuestSelectScreen" then
+                            chooseQuest(frame,epoch)
+                        elseif scene=="BeeSelectScreen" then
+                            chooseBee(frame,epoch)
+                        elseif scene=="UpgradeSelectScreen" then
+                            startRound(epoch)
+                        else
+                            setStatus("RBC: end screen visible; no automatic purchases")
+                        end
+                    end
+                else
+                    CombatSignals.RBCBusy=false
+                    if now-state.LastPassCheck>=3.0 then readPass() end
+                    if state.RoundStartedAt>0 and now-state.RoundStartedAt<310 then
+                        -- After Start Round we must never spend another Pass
+                        -- while the current five-minute challenge is running.
+                        if now-state.RoundStartedAt<4 then
+                            setStatus("RBC: round started; manual Farm/Combat available")
+                        end
+                    elseif state.CachedPass==nil then
+                        setStatus("RBC: cannot read Robo Pass yet; open Inventory > Eggs")
+                    elseif state.CachedPass<=0 then
+                        state.NoPass=true
+                        setStatus("RBC: WAITING PASS (0). Will auto-resume when stocked.")
+                    elseif now-state.StartIssuedAt<25 then
+                        -- Do not click 'Spend 1 Robo Pass' twice when the game
+                        -- has not yet opened the challenge selection UI.
+                        setStatus("RBC: waiting for server to open Challenge screen")
+                    elseif dialogueStep(epoch) then
+                        -- Existing Robo Bear dialogue, handle native GUI first.
+                    elseif now>=state.NextVisit then
+                        approach(epoch)
+                    end
+                end
+                task.wait(0.48)
+            end
+            CombatSignals.RBCBusy=false
+            state.Busy=false
+        end
+        for team,b in pairs(teamButtons) do
+            b.Activated:Connect(function()
+                state.Team=team
+                refresh()
+            end)
+        end
+        toggle.Activated:Connect(function()
+            state.Enabled=not state.Enabled
+            state.Epoch+=1
+            state.NoPass=false
+            state.RoundStartedAt=0
+            state.StartIssuedAt=0
+            state.NextVisit=0
+            CombatSignals.RBCBusy=false
+            if not state.Enabled then
+                SmoothFlight.Cancel()
+                setStatus("RBC disabled")
+                return
+            end
+            setStatus("RBC enabled. Checking Robo Pass inventory...")
+            local epoch=state.Epoch
+            task.spawn(function()
+                local ok,err=pcall(cycle,epoch)
+                CombatSignals.RBCBusy=false
+                if not ok then
+                    warn("[FieldLab RBC]",err)
+                    if available(epoch) then setStatus("RBC error: "..tostring(err)) end
+                end
+            end)
+        end)
+        ConfigManager.Register("RBC",function()
+            return {Team=state.Team}
+        end,function(data)
+            if data.Team=="RED" or data.Team=="BLUE" or data.Team=="WHITE" then
+                state.Team=data.Team
+            end
+            refresh()
+        end)
+        refresh()
+    end
+    initializeRBC()
 end
 
 -- COMBAT: dedicated Ant Challenge controller. It never modifies ordinary
@@ -4542,8 +5005,8 @@ do
         activeButton.Activated:Connect(function()
             if busy then stopAnt(); return end
             if farmEnabled then tell("Turn off Farm before Ant Challenge"); return end
-            if CombatController.IsBusy() or CombatSignals.PlanterBusy then
-                tell("Finish current Combat / Planter action first")
+            if CombatController.IsBusy() or CombatSignals.PlanterBusy or CombatSignals.RBCBusy then
+                tell("Finish current Combat / Planter / RBC action first")
                 return
             end
             busy = true
@@ -5564,8 +6027,8 @@ do
             local nextAllowedVisit = {}
             local lastFieldChoice = nil
             while isRunning(id) do
-                if CombatSignals.AntBusy or CombatSignals.ToyBusy then
-                    setStatus("Quest paused while Ant Challenge / Blender is active")
+                if CombatSignals.AntBusy or CombatSignals.ToyBusy or CombatSignals.RBCBusy then
+                    setStatus("Quest paused while Ant / Blender / RBC setup is active")
                     updateStatusText()
                     task.wait(0.3)
                 else
@@ -6960,7 +7423,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.11") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.12") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -7021,7 +7484,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.11",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.12",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7103,6 +7566,7 @@ do
             Main = "Live inventory & item counts",
             Farm = "Field navigation, bee skills and precision collection",
             Combat = "Mobs, bosses, respawn timers and challenges",
+            RBC = "Robo Bear Challenge • RED / BLUE / WHITE priority",
             Toy = "Crafting & interactive utilities",
             Quest = "NPC selection, objectives and automatic turn-in",
             Upgrade = "Upgrade management",
@@ -7112,7 +7576,7 @@ do
         }
         for i, name in ipairs(tabNames) do
             local b = tabButtons[name]
-            b.Position = UDim2.fromOffset(8, 72 + (i - 1) * 35)
+            b.Position = UDim2.fromOffset(8, 72 + (i - 1) * 31)
             b.Size = UDim2.fromOffset(116, 30)
             b.BackgroundColor3 = C.sidebar
             b.Text = "  " .. name
@@ -7385,6 +7849,15 @@ do
             return y < 100 and "CombatControls" or "CombatTargets"
         end)
 
+        accordions("RBC", {
+            {id="RBCControls",title="RBC  /  AUTO CHALLENGE",height=210,
+                open=true,yBase=0,xBase=0},
+            {id="RBCLive",title="LIVE STATUS  /  ROBO BEAR",height=218,
+                open=true,yBase=178,xBase=0},
+        }, function(obj,x,y)
+            return y < 178 and "RBCControls" or "RBCLive"
+        end)
+
         accordions("Quest", {
             {id="QuestControls",title="QUEST  /  AUTOMATION",height=113,
                 open=true,yBase=0,xBase=0,
@@ -7477,6 +7950,7 @@ do
                 local mode = "READY"
                 if CombatSignals.AntBusy then mode = "ANT CHALLENGE"
                 elseif CombatSignals.PlanterBusy then mode = "PLANTER RUNNING"
+                elseif CombatSignals.RBCBusy then mode = "RBC SETUP"
                 elseif farmEnabled then mode = "FARM ACTIVE"
                 elseif clickEnabled then mode = "AUTO CLICK ACTIVE" end
                 statusText.Text = "● " .. mode .. "    •    Wheel / touch to scroll"
@@ -7502,7 +7976,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.11" then
+    if runtime and runtime.Version == "8.6.12" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
