@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.7
+-- FIELDLAB_BUILD: 8.6.8
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.7", Ready = false}
+    local runtime = {Version = "8.6.8", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.7 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.8 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -52,6 +52,8 @@ local currentFarmTravelTween = nil
 local hiveBusy = true
 -- Combat is defined after the Farm UI. These callbacks give manual controls priority.
 local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false, Sprinkler = {Enabled = false, LastField = nil, LastAt = 0, RetryAt = 0, LastCharacter = nil}}
+-- Combat-owned Stump Farm uses this shared avoidance state. Other farms are unaffected.
+CombatSignals.AvoidMob = nil
 
 -- v7.7: One physics-based flight controller shared by Hive / Farm / Combat / Quest.
 -- Avoid several HumanoidRootPart CFrame tweens fighting physics or each other.
@@ -1525,6 +1527,19 @@ local function horizontalDistance(a, b)
     return (Vector3.new(a.X - b.X, 0, a.Z - b.Z)).Magnitude
 end
 
+-- Avoid only during Combat's internal Stump Farm. Never affect manual Farm.
+local function combatFarmUnsafe(point, extra)
+    local threat = CombatSignals.AvoidMob
+    if not threat or threat.Token ~= farmToken or threat.Field ~= selectedField then
+        return false
+    end
+    -- If we cannot see the snail yet, park at the field center instead of
+    -- wandering blindly into the edge of its circular path.
+    if not threat.Position then return true end
+    return point == nil or horizontalDistance(point, threat.Position)
+        < threat.Radius + (extra or 0)
+end
+
 -- Collect only tokens within the SAFE interior, not the dangerous outer rim.
 local particleRoot = nil
 local collectibleFolder = nil
@@ -1562,7 +1577,8 @@ local function nearestCollectible(field, root)
     for _, part in ipairs(folder:GetDescendants()) do
         if part:IsA("BasePart") and part.Name == "C"
             and (collectibleCooldown[part] or 0) <= now
-            and tokenInsideField(field, part) then
+            and tokenInsideField(field, part)
+            and not combatFarmUnsafe(part.Position, 3) then
             local dist = horizontalDistance(root.Position, part.Position)
             -- rbxassetid://1629547638 outranks ordinary pollen/ability tokens.
             for _, decal in ipairs(part:GetChildren()) do
@@ -1648,7 +1664,8 @@ local function chooseDuped(field, root, smileOnly)
     local now = os.clock()
     local best, dest, bestIsSmile, closest = nil, nil, false, math.huge
     for _, part in ipairs(folder:GetDescendants()) do
-        if dupedInField(field, part) and (handledDuped[part] or 0) <= now then
+        if dupedInField(field, part) and (handledDuped[part] or 0) <= now
+            and not combatFarmUnsafe(part.Position, 3) then
             local smile = isSmileDuped(part)
             if not smileOnly or smile then
                 local ground = projectInside(field, groundPosition(part.Position), 0.4)
@@ -2137,6 +2154,54 @@ local function beginWalking(field, token, name)
                     if flat.Magnitude > 1 then desired = flat.Unit end
                 end
             end
+            -- Live Stump Snail safety: retreat early, BEFORE contact. Tokens,
+            -- crosshairs and patrol waypoints never override this steering.
+            local threat = CombatSignals.AvoidMob
+            if threat and threat.Token == token and threat.Field == name then
+                if not threat.Position then
+                    local center = threat.Center
+                    if center then
+                        local toCenter = Vector3.new(center.X-root.Position.X,
+                            0,center.Z-root.Position.Z)
+                        desired = toCenter.Magnitude > 3 and toCenter.Unit or Vector3.zero
+                    else
+                        desired = Vector3.zero
+                    end
+                else
+                    local danger = threat.Position
+                    local away = Vector3.new(root.Position.X-danger.X,0,
+                        root.Position.Z-danger.Z)
+                    local distance = away.Magnitude
+                    local goalDangerous = goal and
+                        horizontalDistance(goal,danger) < threat.Radius + 4
+                    if distance < threat.Radius + 7 or goalDangerous then
+                        local outward = distance > 0.1 and away.Unit or Vector3.new(1,0,0)
+                        local step = math.max(9,threat.Radius + 11 - distance)
+                        local escape = projectInside(field,root.Position + outward*step,0.5)
+                        if not escape or horizontalDistance(escape,danger) < distance + 1 then
+                            local center = threat.Center
+                            if center and horizontalDistance(center,danger) > distance + 1 then
+                                escape = center
+                            else
+                                local tangent = Vector3.new(-outward.Z,0,outward.X)
+                                local a = projectInside(field,root.Position+tangent*13,0.5)
+                                local b = projectInside(field,root.Position-tangent*13,0.5)
+                                local da = a and horizontalDistance(a,danger) or -1
+                                local db = b and horizontalDistance(b,danger) or -1
+                                escape = da >= db and a or b
+                            end
+                        end
+                        if escape and horizontalDistance(escape,danger) > distance + 0.5 then
+                            local vector = Vector3.new(escape.X-root.Position.X,
+                                0,escape.Z-root.Position.Z)
+                            desired = vector.Magnitude > 0.8 and vector.Unit or Vector3.zero
+                        else
+                            desired = Vector3.zero
+                        end
+                        if distance < threat.Radius - 2 then humanoid.Jump = true end
+                    end
+                end
+            end
             heading = heading:Lerp(desired, math.clamp(dt * 10, 0, 1))
             humanoid:Move(heading, false)
         end
@@ -2378,6 +2443,11 @@ local function navigateInField(field, destination, token, name, targetPart, flam
     destination = projectInside(field, destination,
         (crosshairObject or dupedObject) and 0.3 or (flameObject and 2 or nil))
     if not destination then return false end
+    if combatFarmUnsafe(destination, 3) then
+        walkDestination = nil
+        if targetPart then collectibleCooldown[targetPart] = os.clock() + 2.5 end
+        return false
+    end
     if horizontalDistance(root.Position, destination) <=
         ((crosshairObject or dupedObject) and 1.15 or (flameObject and 1.4 or 2.8)) then
         return true
@@ -3369,13 +3439,40 @@ do
         local function moveLeg(root, destination, keepGoing)
             return movePath(root, {destination}, keepGoing)
         end
+        -- Ordinary mobs: approach to attack range, never directly onto the
+        -- MonsterSpawner center. Retreat if a moving monster gets too close.
+        local function observedMobPosition(spawner)
+            local monsters = workspace:FindFirstChild("Monsters")
+            local territory = territoryPart(spawner)
+            if not monsters or not territory then return nil end
+            local category = mobCategory(typeOf(spawner))
+            local best, nearest = nil, math.huge
+            for _, mob in ipairs(monsters:GetChildren()) do
+                if mobCategory(mob.Name) == category then
+                    local pos = windyPosition(mob)
+                    local dist = pos and horizontalDistance(pos,territory.Position)
+                    if dist and dist < nearest and dist < 90 then
+                        best,nearest = pos,dist
+                    end
+                end
+            end
+            return best
+        end
+        local function standoffPoint(enemy, from, radius)
+            local away = Vector3.new(from.X-enemy.X,0,from.Z-enemy.Z)
+            local dir = away.Magnitude > 0.5 and away.Unit or Vector3.new(1,0,0)
+            return groundPosition(enemy+dir*radius+Vector3.new(0,3,0))
+        end
         local function moveToSpawn(spawner, keepGoing)
             local territory = territoryPart(spawner)
             if not territory then return false end
             local humanoid, root = getHumanoidAndRoot()
             if not root or humanoid.Health <= 0 then return false end
             local center = territory.Position
-            local ground = center + Vector3.new(0, math.min(territory.Size.Y / 2 + 2.5, 6), 0)
+            local livePosition = observedMobPosition(spawner)
+            local ground = livePosition
+                and standoffPoint(livePosition,root.Position,15)
+                or standoffPoint(center,root.Position,12)
             local points = {}
             if (root.Position - ground).Magnitude > 28 then
                 local altitude = math.max(root.Position.Y, ground.Y) + 18
@@ -3534,16 +3631,48 @@ do
             if hum.Health <= 0 then state.LastResult = "Coconut Crab: character died" end
             return false
         end
+        local function stumpThreatPosition(spawner)
+            local monsters = workspace:FindFirstChild("Monsters")
+            local territory = territoryPart(spawner)
+            if not monsters then return nil,nil end
+            local best, nearest, bestRadius = nil, math.huge, 19
+            for _,mob in ipairs(monsters:GetChildren()) do
+                if mobCategory(mob.Name) == "stumpsnail" then
+                    local pos = windyPosition(mob)
+                    local dist = pos and territory
+                        and horizontalDistance(pos,territory.Position) or 0
+                    if pos and dist < nearest and dist < 130 then
+                        nearest = dist
+                        local head = mob:FindFirstChild("Head",true)
+                            or mob:FindFirstChild("SnailHead",true)
+                        if head and head:IsA("BasePart") then
+                            best,bestRadius = head.Position,14
+                        else
+                            best,bestRadius = pos,19
+                        end
+                    end
+                end
+            end
+            return best,bestRadius
+        end
         local function fightStump(spawner, keepGoing)
             local token, previousField, errorMessage = claimStumpFarm()
             if not token then
                 state.LastResult = errorMessage or "Unable to start Stump Farm"
                 return false
             end
-            state.LastResult = "Stump Snail: farming Stump Field while bees attack"
+            local field = FlowerZones:FindFirstChild("Stump Field")
+            local avoidance = {
+                Field = "Stump Field", Token = token, Radius = 19,
+                Position = nil, Center = field and fieldCenter(field),
+            }
+            CombatSignals.AvoidMob = avoidance
+            state.LastResult = "Stump Snail: safe farming, keep away from snail"
             local success = false
             while keepGoing() and farmEnabled and farmToken == token
                 and selectedField == "Stump Field" do
+                avoidance.Position, avoidance.Radius = stumpThreatPosition(spawner)
+                if not avoidance.Position then avoidance.Radius = 19 end
                 local _, remaining, displayed = liveTimer(spawner)
                 if displayed and remaining and remaining > 0 then
                     success = true
@@ -3559,6 +3688,8 @@ do
                 -- No movement from Combat: runFarm handles all field movement.
                 task.wait(0.25)
             end
+            -- Clear the avoidance overlay before handing movement back.
+            if CombatSignals.AvoidMob == avoidance then CombatSignals.AvoidMob = nil end
             releaseStumpFarm(token, previousField)
             return success
         end
@@ -3643,10 +3774,17 @@ do
                         state.LastResult = "Character down; stopping Combat"
                         return false
                     end
-                    -- Gentle movement for ordinary mobs only. Bosses use custom routines.
-                    if origin and (root.Position - origin).Magnitude < 9 then
-                        humanoid:Move(Vector3.new(math.sin(os.clock() * 1.3) * .3, 0,
-                            math.cos(os.clock() * 1.3) * .3), false)
+                    -- No aimless drift into the monster. Reposition only
+                    -- when the enemy enters a dangerous contact range.
+                    local enemy = liveMob and windyPosition(liveMob)
+                    if enemy and horizontalDistance(root.Position, enemy) < 11 then
+                        local safe = standoffPoint(enemy,root.Position,17)
+                        if safe and keepGoing() then
+                            state.LastResult = spawner.Name .. ": dodging contact (17 stud)"
+                            moveLeg(root,safe,keepGoing)
+                        end
+                    else
+                        humanoid:Move(Vector3.zero,false)
                     end
                     task.wait(0.18)
                 end
@@ -6396,6 +6534,7 @@ screen.Destroying:Connect(function()
     if currentFarmTravelTween then currentFarmTravelTween:Cancel() end
     SmoothFlight.Cancel()
     CombatSignals.LootBusy = false
+    CombatSignals.AvoidMob = nil
     stopWalking()
     resetFacing()
     if facingConnection then facingConnection:Disconnect() end
@@ -6610,7 +6749,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.7") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.8") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6671,7 +6810,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.7",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.8",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -7152,7 +7291,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.7" then
+    if runtime and runtime.Version == "8.6.8" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
