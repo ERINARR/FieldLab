@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.1
+-- FIELDLAB_BUILD: 8.6.2
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.1", Ready = false}
+    local runtime = {Version = "8.6.2", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.1 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.2 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -51,7 +51,7 @@ local currentHiveTween = nil
 local currentFarmTravelTween = nil
 local hiveBusy = true
 -- Combat is defined after the Farm UI. These callbacks give manual controls priority.
-local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil}
+local CombatSignals = {PlanterBusy = false, AntBusy = false, AntCancel = nil, AntStatus = "", ToyBusy = false, ToyCancel = nil, LootBusy = false}
 
 -- v7.7: One physics-based flight controller shared by Hive / Farm / Combat / Quest.
 -- Avoid several HumanoidRootPart CFrame tweens fighting physics or each other.
@@ -2232,7 +2232,7 @@ do
                 end
                 if not points then return false end
                 local blocked = false
-                for _, wp in ipairs(points) do
+                for wpIndex, wp in ipairs(points) do
                     desiredPoint = wp.Position
                     local before = os.clock()
                     local improvedAt, best = before, math.huge
@@ -2240,7 +2240,7 @@ do
                     while permitted() and humanoid.Health > 0 do
                         if targetPart and not targetPart.Parent then return true end
                         local dist = horizontalDistance(root.Position, desiredPoint)
-                        if dist <= 2.5 then break end
+                        if dist <= (wpIndex == #points and 0.9 or 2.5) then break end
                         if dist < best - .25 then
                             best, improvedAt = dist, os.clock()
                         end
@@ -2262,11 +2262,11 @@ do
                     end
                     if blocked or not permitted() then break end
                 end
-                if horizontalDistance(root.Position, target) <= 3.1
+                if horizontalDistance(root.Position, target) <= 1.25
                     or (targetPart and not targetPart.Parent) then return true end
                 if not blocked then break end
             end
-            return horizontalDistance(root.Position, target) <= 3.1
+            return horizontalDistance(root.Position, target) <= 1.25
         end)
         cleanup()
         if not ok then warn("[BSS Loot walking]", arrived) end
@@ -2274,6 +2274,9 @@ do
     end
     function LootTools.CollectNew(options)
         local center = options.Center
+        -- A defeated mob can drop rewards around its actual death point rather
+        -- than the center of its MonsterSpawner territory.
+        local centers = options.Centers or {center}
         local radius = options.Radius or 40
         local duration = options.Duration or 28
         local baseline = options.Before or {}
@@ -2285,6 +2288,7 @@ do
         local lastFound = started
         local foundNew, collected = false, 0
         local maxWaitForDrops = options.DropGrace or 8
+        local quietPeriod = options.QuietPeriod or 4.5
         local collectOld = options.CollectExisting == true
         while allowed() and os.clock() - started < duration do
             local humanoid, root = getHumanoidAndRoot()
@@ -2294,9 +2298,16 @@ do
             LootTools.Each(function(part)
                 if part.Parent and (tries[part] or 0) < 2 then
                     local p = part.Position
-                    if horizontalDistance(p, center) <= radius
-                        and math.abs(p.Y - center.Y) <= 65
-                        and (not field or insideField(field, p, 0)) then
+                    local nearby = false
+                    for _, source in ipairs(centers) do
+                        if typeof(source) == "Vector3"
+                            and horizontalDistance(p, source) <= radius
+                            and math.abs(p.Y - source.Y) <= 80 then
+                            nearby = true
+                            break
+                        end
+                    end
+                    if nearby and (not field or insideField(field, p, 0)) then
                         local d = horizontalDistance(p, root.Position)
                             - (LootTools.IsPriority(part) and 100000 or 0)
                         if not baseline[part] then
@@ -2326,8 +2337,8 @@ do
                 end
             else
                 -- Do not exit prematurely while reward tokens are still spawning.
-                if os.clock() - started > maxWaitForDrops
-                    and os.clock() - lastFound >= (foundNew and 3.5 or 5) then
+                if os.clock() - started >= maxWaitForDrops
+                    and os.clock() - lastFound >= (foundNew and quietPeriod or math.max(quietPeriod, 5)) then
                     break
                 end
                 task.wait(0.12)
@@ -3300,39 +3311,62 @@ do
                 or mobCategory(spawner.Name) == "stumpsnail"
         end
         -- Loot after a verified kill. One descent, then Farm-style walking.
+        -- Shared post-kill barrier for both Quest fights and Auto Combat.
+        -- Hold the movement lock until reward drops were observed and collected,
+        -- or the finite loot timeout expires. Never let another automatic job
+        -- steal control while the fight's reward tokens are still on the ground.
         local function collectMobLoot(spawner, before, keepGoing)
-            if isStump(spawner) then return 0 end
             local area = territoryPart(spawner)
-            if not area then return 0 end
+            local _, root = getHumanoidAndRoot()
+            if not area and not root then return 0 end
             local coconut = isCoconut(spawner)
+            local snail = isStump(spawner)
             local targetField = coconut and FlowerZones:FindFirstChild("Coconut Field") or nil
-            local cf, size = targetField and bounds(targetField) or nil, nil
+            local cf, size = nil, nil
             if targetField then cf, size = bounds(targetField) end
-            local center = cf and cf.Position or area.Position
-            local zoneSize = size or area.Size
-            local radius = coconut and math.clamp(math.max(zoneSize.X, zoneSize.Z) * .82, 60, 120)
-                or math.clamp(math.max(zoneSize.X, zoneSize.Z) * .80 + 16, 33, 65)
+            local center = (cf and cf.Position)
+                or (area and area.Position)
+                or (root and root.Position)
+            local zoneSize = size or (area and area.Size) or Vector3.new(40, 4, 40)
+            local radius = coconut and math.clamp(math.max(zoneSize.X, zoneSize.Z) * .82, 65, 120)
+                or math.clamp(math.max(zoneSize.X, zoneSize.Z) * .80 + 20, 40, 75)
+            local centers = {center}
+            if root and horizontalDistance(root.Position, center) <= 135 then
+                table.insert(centers, root.Position)
+            end
             local function allowed()
                 return keepGoing() and screen.Parent ~= nil and not state.ManualFarm
                     and not farmEnabled and not CombatSignals.AntBusy
-                    and not CombatSignals.PlanterBusy
+                    and not CombatSignals.PlanterBusy and not CombatSignals.ToyBusy
             end
-            state.LastResult = "Waiting for drops: " .. spawner.Name
-            -- This is needed not only for Coconut; other flying fights can end in air.
-            local _, root = getHumanoidAndRoot()
+            if not allowed() then return 0 end
+            -- Stump Snail historically awards directly to the inventory, unlike
+            -- ordinary ring-of-token mobs. Briefly check for exceptional tokens.
+            if snail then
+                state.LastResult = "Stump Snail: checking reward delivery"
+                local deadline = os.clock() + 3
+                while allowed() and os.clock() < deadline do task.wait(0.15) end
+                return 0
+            end
+            state.LastResult = "Waiting for reward drops: " .. spawner.Name
+            -- The character may still be hovering high over the Coconut Crab.
+            -- Return to ground BEFORE starting the collection walk.
             if root and root.Position.Y > center.Y + 11 and allowed() then
-                local landing = Vector3.new(root.Position.X, center.Y + 3, root.Position.Z)
-                if targetField then landing = fieldCenter(targetField) end
-                SmoothFlight.Path(root, {landing}, allowed, TweenSpeed)
+                local landing = targetField and fieldCenter(targetField)
+                    or groundPosition(Vector3.new(root.Position.X, center.Y + 3, root.Position.Z))
+                if landing then SmoothFlight.Path(root, {landing}, allowed, TweenSpeed) end
             end
             if not allowed() then return 0 end
             local total = LootTools.CollectNew({
-                Center = center, Radius = radius, Duration = coconut and 48 or 35,
-                DropGrace = 9, Before = before, CollectExisting = true,
-                Field = targetField, Allowed = allowed,
+                Center = center, Centers = centers, Radius = radius,
+                Duration = coconut and 60 or 48, DropGrace = 9,
+                QuietPeriod = 5.5, Before = before, CollectExisting = true,
+                -- Do not restrict combat drops to the flower-zone rectangle;
+                -- boss rewards and normal mob rings can spawn at the edge.
+                Allowed = allowed,
                 Report = function(msg) state.LastResult = msg end
             })
-            state.LastResult = spawner.Name .. ": loot pass finished (" .. total .. " confirmed)"
+            state.LastResult = spawner.Name .. ": reward sweep complete (" .. total .. " confirmed)"
             return total
         end
 
@@ -3539,24 +3573,31 @@ do
                 return false
             end)
             cancelHover()
-            -- Only after a CONFIRMED kill: gather drops before the next task.
-            -- The same keepGoing/cancel rules apply, so manual Farm instantly
-            -- overrides the loot phase. Stump Snail is handled without loot.
+            -- The loot pass must finish before Quest evaluates the next task.
+            -- A kill can be visible through new drops before the timer updates.
             local sawNewDrops = false
-            if ok and lootBaseline and result ~= true then
+            if ok and lootBaseline and result ~= true and keepGoing() then
                 local area = territoryPart(spawner)
-                if area then
+                local _, root = getHumanoidAndRoot()
+                local scanUntil = os.clock() + 2.5
+                repeat
                     LootTools.Each(function(part)
                         if part.Parent and not lootBaseline[part]
-                            and horizontalDistance(part.Position,area.Position) <= 65 then
+                            and ((area and horizontalDistance(part.Position, area.Position) <= 90)
+                                or (root and horizontalDistance(part.Position, root.Position) <= 90)) then
                             sawNewDrops = true
                         end
                     end)
-                end
+                    if sawNewDrops or not keepGoing() then break end
+                    task.wait(0.15)
+                until os.clock() >= scanUntil
             end
-            if ok and lootBaseline and (result == true or sawNewDrops) then
+            if ok and (result == true or sawNewDrops) and keepGoing() then
+                CombatSignals.LootBusy = true
+                state.LastResult = "Post-kill loot locked: " .. spawner.Name
                 local lootOK, lootError = pcall(collectMobLoot, spawner,
-                    lootBaseline, keepGoing)
+                    lootBaseline or {}, keepGoing)
+                CombatSignals.LootBusy = false
                 if not lootOK then
                     warn("[BSS Combat Loot]", lootError)
                     state.LastResult = "Loot error: " .. tostring(lootError)
@@ -3684,11 +3725,22 @@ do
                 return false
             end)
             if ok and result == true and keepGoing() then
-                local center = point
-                LootTools.CollectNew({Center=center,Radius=65,Duration=30,DropGrace=8,
-                    Before=before,CollectExisting=true,Allowed=keepGoing,
-                    Report=function(msg) state.LastResult=msg end})
-                state.LastResult = "Windy Bee: fight/loot finished"
+                CombatSignals.LootBusy = true
+                local lootOK, lootError = pcall(function()
+                    local _, latestRoot = getHumanoidAndRoot()
+                    local centers = {point}
+                    if latestRoot then table.insert(centers, latestRoot.Position) end
+                    if latestRoot and latestRoot.Position.Y > point.Y + 11 then
+                        SmoothFlight.Path(latestRoot, {groundPosition(point)}, keepGoing, TweenSpeed)
+                    end
+                    LootTools.CollectNew({Center=point,Centers=centers,
+                        Radius=80,Duration=55,DropGrace=10,QuietPeriod=5.5,
+                        Before=before,CollectExisting=true,Allowed=keepGoing,
+                        Report=function(msg) state.LastResult=msg end})
+                end)
+                CombatSignals.LootBusy = false
+                if not lootOK then warn("[BSS Windy Loot]", lootError) end
+                state.LastResult = "Windy Bee: reward sweep finished"
             elseif not ok then
                 warn("[BSS Windy Combat]",result)
             end
@@ -4736,6 +4788,12 @@ do
             for _, name in ipairs(selectedNames()) do
                 local q = questForBear(quests, name)
                 if q and q.Complete then
+                    -- Quest GUI often flips to Complete on the exact kill tick.
+                    -- Never cancel combat or the post-kill loot pass for NPC return.
+                    if CombatController.IsBusy() or CombatSignals.LootBusy then
+                        setStatus(name .. ": complete; waiting for combat loot")
+                        break
+                    end
                     questState.PendingVisit = name
                     CombatController.PrioritizeQuest(true)
                     if farmEnabled then suspendFarm() end
@@ -5940,6 +5998,7 @@ screen.Destroying:Connect(function()
     if currentHiveTween then currentHiveTween:Cancel() end
     if currentFarmTravelTween then currentFarmTravelTween:Cancel() end
     SmoothFlight.Cancel()
+    CombatSignals.LootBusy = false
     stopWalking()
     resetFacing()
     if facingConnection then facingConnection:Disconnect() end
@@ -6154,7 +6213,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.1") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.2") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6215,7 +6274,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.1",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.2",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -6693,7 +6752,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.1" then
+    if runtime and runtime.Version == "8.6.2" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
