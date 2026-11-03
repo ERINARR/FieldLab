@@ -1,4 +1,4 @@
--- FIELDLAB_BUILD: 8.6.3
+-- FIELDLAB_BUILD: 8.6.4
 -- Managed runtime capsule. The loader compiles new code before replacing the app.
 -- A reload is a clean app restart, not an in-place rewrite of executing Lua functions.
 do
@@ -11,7 +11,7 @@ do
         end
         pcall(old.Stop)
     end
-    local runtime = {Version = "8.6.3", Ready = false}
+    local runtime = {Version = "8.6.4", Ready = false}
     function runtime.Stop()
         runtime.Ready = false
         -- Safe even if initialization failed before cleanup callbacks were installed.
@@ -23,7 +23,7 @@ do
     env.__FIELDLAB_APP = runtime
 end
 
--- BSS HIVE / FIELD MANAGER v8.6.3 (Midnight UI + Managed Live Runtime)
+-- BSS HIVE / FIELD MANAGER v8.6.4 (Midnight UI + Managed Live Runtime)
 -- Inventory is initialized inside its own function scope to keep the
 -- main script below the Luau per-function local-register limit.
 -- Farm: stable walking, Flame Heat, Precise Crosshair, Digital Bee Duped Tokens
@@ -4410,13 +4410,43 @@ do
             tell("Selecting "..requested)
             if not cycleUntil(box,requested,id) then
                 tell("Recipe not found in Blender GUI");return end
-            local make=findButton(box,"ButtonBlock")
-            if not make then tell("ButtonBlock missing");return end
-            if not click(make,id) then tell("Couldn't click Make");return end
-            task.wait(.15)
+            -- ButtonBlock is NOT the green "Make" button. The actual
+            -- interactive control in the Blender GUI is SelectBox.SelectButton.
+            -- NativeInteraction.Click returning true only means the click was
+            -- dispatched, not that the Roblox game accepted the action.
+            local selectBox=box:FindFirstChild("SelectBox",true)
+            local make=findButton(selectBox,"SelectButton")
+            if not make then
+                tell("Blender SelectBox.SelectButton missing; UI changed")
+                return
+            end
             local quant=box:FindFirstChild("QuantitySelect",true)
-            if not quant or not NativeInteraction.Visible(quant) then
-                tell("QuantitySelect did not open; check ingredients");return end
+            local opened=false
+            for attempt=1,2 do
+                if not available(id) then return end
+                if not click(make,id) then
+                    tell("Cannot click the Blender's Make button")
+                    return
+                end
+                -- Native UI often updates later than the previous 0.15s wait.
+                local deadline=os.clock()+1.5
+                repeat
+                    quant=box:FindFirstChild("QuantitySelect",true)
+                    if quant and NativeInteraction.Visible(quant) then
+                        opened=true
+                        break
+                    end
+                    task.wait(.1)
+                until not available(id) or os.clock()>=deadline
+                if opened then break end
+                if attempt==1 then
+                    tell("Make clicked, but quantity dialog is delayed; retrying...")
+                end
+            end
+            if not opened then
+                tell("Game did not open quantity dialog; check Make button/materials")
+                return
+            end
             local plus=findButton(quant,"PlusButton")
             local minus=findButton(quant,"MinusButton")
             local confirm=findButton(quant,"ConfirmButton")
@@ -6296,7 +6326,7 @@ do
             local loader = getLoader()
             if loader then
                 toggle.Text = loader.Auto and "AUTO UPDATE ON" or "AUTO UPDATE OFF"
-                status.Text = "v" .. tostring(loader.LastVersion or "8.6.3") .. "  |  "
+                status.Text = "v" .. tostring(loader.LastVersion or "8.6.4") .. "  |  "
                     .. tostring(loader.Status or "Running")
             end
             task.wait(0.7)
@@ -6357,7 +6387,7 @@ do
         ui("TextLabel", {
             Position = UDim2.fromOffset(15, 37), Size = UDim2.fromOffset(108, 18),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.3",
+            TextColor3 = C.soft, Text = "MIDNIGHT  /  v8.6.4",
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, side)
 
@@ -6834,7 +6864,7 @@ end)
 do
     local env = (type(getgenv) == "function" and getgenv()) or _G
     local runtime = env.__FIELDLAB_APP
-    if runtime and runtime.Version == "8.6.3" then
+    if runtime and runtime.Version == "8.6.4" then
         runtime.Screen = screen
         runtime.Snapshot = function()
             local pos = window.Position
